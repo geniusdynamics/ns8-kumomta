@@ -64,7 +64,7 @@ RCPT reply from the cluster address
 Event is logged
     [Arguments]    ${type}    ${recipient}
     ${result} =    Run action    list-recent-events    {"types":["${type}"],"limit":500}
-    ${found} =    Evaluate    [e for e in $result['events'] if e['recipient'] == $recipient]
+    ${found} =    Evaluate    list(filter(lambda e, r=$recipient: e['recipient'] == r, $result['events']))
     Should Not Be Empty    ${found}    no ${type} record for ${recipient} yet
     RETURN    ${found}[0]
 

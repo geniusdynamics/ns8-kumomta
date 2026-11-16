@@ -41,9 +41,14 @@ if "domains" in data:
                 entry[key] = old.get(key, entry[key])
         admin.append(entry)
     settings["domains"] = admin + [d for d in current["domains"] if d.get("owner")]
-settings["domains"] = sorted([dict({"owner": "", "tenant": "", "status": "pending", "last_checked": "", "checks": []},
-                                   **d, domain=d["domain"].lower(), selector=d.get("selector") or "kumo1")
-                              for d in settings["domains"]], key=lambda d: d["domain"])
+normalized = []
+for d in settings["domains"]:
+    entry = {"owner": "", "tenant": "", "status": "pending", "last_checked": "", "checks": []}
+    entry.update(d)
+    entry["domain"] = d["domain"].lower()
+    entry["selector"] = d.get("selector") or "kumo1"
+    normalized.append(entry)
+settings["domains"] = sorted(normalized, key=lambda d: d["domain"])
 settings["api_host"] = settings["api_host"].lower()
 settings["api_allowlist"] = [kumo.normalize_network(n) for n in settings["api_allowlist"]]
 settings["bounce_domain"] = settings["bounce_domain"].lower().rstrip(".")

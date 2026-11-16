@@ -22,6 +22,16 @@ export default {
           `${action}-completed-${eventId}`,
           (taskContext, taskResult) => {
             cleanup();
+            if (
+              action === "get-configuration" &&
+              taskResult.output &&
+              Array.isArray(taskResult.output.warnings)
+            ) {
+              this.$store.commit(
+                "setConfigWarnings",
+                taskResult.output.warnings
+              );
+            }
             resolve(taskResult.output);
           }
         );

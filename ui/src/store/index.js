@@ -13,6 +13,8 @@ export default new Vuex.Store({
     instanceName: "",
     instanceLabel: "",
     core: null,
+    // Banners shown on every page, from get-configuration (e.g. sink mode)
+    configWarnings: [],
   },
   mutations: {
     setInstanceName(state, instanceName) {
@@ -26,6 +28,9 @@ export default new Vuex.Store({
     },
     setAppName(state, appName) {
       state.appName = appName;
+    },
+    setConfigWarnings(state, warnings) {
+      state.configWarnings = warnings || [];
     },
   },
   actions: {

@@ -45,12 +45,13 @@ buildah add "${container}" imageroot /imageroot
 buildah add "${container}" ui/dist /ui
 # - rootless: kumod binds the SMTP ports with the host network (NS8 sets
 #   net.ipv4.ip_unprivileged_port_start=23), like ns8-mail
-# - one TCP port: the KumoMTA HTTP API on 127.0.0.1
+# - two TCP ports on 127.0.0.1: the KumoMTA HTTP API, and the domain
+#   management API of the integrations (kumomta-api)
 # - node:fwadm opens the SMTP ports, traefik@node:fulladm gives the TLS
 #   certificate of the host name and the optional metrics route
 buildah config --entrypoint=/ \
     --label="org.nethserver.authorizations=traefik@node:fulladm node:fwadm" \
-    --label="org.nethserver.tcp-ports-demand=1" \
+    --label="org.nethserver.tcp-ports-demand=2" \
     --label="org.nethserver.rootfull=0" \
     --label="org.nethserver.min-core=3.20.1" \
     --label="org.nethserver.volumes=kumomta-spool" \

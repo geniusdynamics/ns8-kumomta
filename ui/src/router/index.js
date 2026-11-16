@@ -11,6 +11,7 @@ import Users from "../views/Users.vue";
 import Domains from "../views/Domains.vue";
 import Delivery from "../views/Delivery.vue";
 import OpenBao from "../views/OpenBao.vue";
+import Integrations from "../views/Integrations.vue";
 
 Vue.use(VueRouter);
 
@@ -45,6 +46,11 @@ const routes = [
     path: "/delivery",
     name: "Delivery",
     component: Delivery,
+  },
+  {
+    path: "/integrations",
+    name: "Integrations",
+    component: Integrations,
   },
   {
     path: "/openbao",

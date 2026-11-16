@@ -59,20 +59,52 @@
                 <NsButton
                   kind="ghost"
                   :icon="TrashCan20"
-                  :disabled="busy"
-                  @click="domains.splice(index, 1)"
+                  :disabled="busy || loading.remove === dom.domain"
+                  :loading="loading.remove === dom.domain"
+                  @click="removeDomain(dom, index)"
                   >{{ $t("common.remove") }}</NsButton
                 >
               </div>
               <template v-if="!dom.isNew">
-                <div class="mg-bottom-sm">
+                <div class="mg-bottom-sm tags">
+                  <NsTag
+                    :kind="statusKind(dom.status)"
+                    :label="$t('domains.status_' + dom.status)"
+                  />
                   <NsTag
                     :kind="dom.key_location === 'missing' ? 'red' : 'green'"
                     :label="$t('domains.key_' + dom.key_location)"
                   />
+                  <NsTag
+                    v-if="dom.owner"
+                    kind="purple"
+                    :label="$t('domains.owner', { owner: dom.owner })"
+                  />
+                  <NsTag
+                    v-if="dom.tenant"
+                    kind="cool-gray"
+                    :label="$t('domains.tenant', { tenant: dom.tenant })"
+                  />
+                  <span class="checked">{{
+                    dom.last_checked
+                      ? $t("domains.last_checked", { time: dom.last_checked })
+                      : $t("domains.never_checked")
+                  }}</span>
                 </div>
-                <template v-if="dom.dkim_record">
-                  <div class="label">{{ $t("domains.dns_record") }}</div>
+                <div class="label">{{ $t("domains.dns_records") }}</div>
+                <div
+                  v-for="rec in dom.records"
+                  :key="rec.check + rec.name"
+                  class="record"
+                >
+                  <div class="record-head">
+                    <NsTag
+                      size="sm"
+                      :kind="checkKind(dom, rec.check)"
+                      :label="checkLabel(dom, rec)"
+                    />
+                    <span class="purpose">{{ rec.purpose }}</span>
+                  </div>
                   <NsCodeSnippet
                     :copyTooltip="$t('common.copy_to_clipboard')"
                     :copyFeedback="$t('common.copied')"
@@ -80,11 +112,22 @@
                     :lessText="$t('common.show_less')"
                     light
                     class="mg-bottom-sm"
-                    >{{ dom.dkim_record.name }} IN TXT "{{
-                      dom.dkim_record.value
-                    }}"</NsCodeSnippet
+                    >{{ rec.name }} IN {{ rec.type }}
+                    {{
+                      rec.type === "TXT" ? '"' + rec.value + '"' : rec.value
+                    }}</NsCodeSnippet
                   >
-                </template>
+                </div>
+                <NsButton
+                  kind="tertiary"
+                  size="small"
+                  :icon="Search20"
+                  :loading="loading.validate === dom.domain"
+                  :disabled="busy || !!loading.validate"
+                  class="mg-right"
+                  @click="validateDomain(dom)"
+                  >{{ $t("domains.validate") }}</NsButton
+                >
                 <NsButton
                   kind="tertiary"
                   size="small"
@@ -110,6 +153,13 @@
               @click="addDomain"
               >{{ $t("domains.add_domain") }}</NsButton
             >
+            <NsInlineNotification
+              v-if="error.validate"
+              kind="error"
+              :title="$t('action.validate-domain')"
+              :description="error.validate"
+              :showCloseButton="false"
+            />
             <NsInlineNotification
               v-if="error.generate"
               kind="error"
@@ -231,11 +281,14 @@ export default {
         getConfiguration: false,
         configureModule: false,
         generate: "",
+        validate: "",
+        remove: "",
       },
       error: {
         getConfiguration: "",
         configureModule: "",
         generate: "",
+        validate: "",
         domains: "",
         inbound_routes: "",
       },
@@ -293,9 +346,14 @@ export default {
       this.clearErrors(this);
       this.loading.configureModule = true;
       const data = {
+        // the domains of the integrations are managed through the API
         domains: this.domains
-          .filter((d) => d.domain)
-          .map((d) => ({ domain: d.domain, selector: d.selector || "kumo1" })),
+          .filter((d) => d.domain && !d.owner)
+          .map((d) => ({
+            domain: d.domain,
+            selector: d.selector || "kumo1",
+            tenant: d.tenant || "",
+          })),
         inbound_routes: this.routes
           .filter((r) => r.domain && r.host)
           .map((r) => ({
@@ -314,6 +372,66 @@ export default {
         this.error.configureModule = this.taskErrorMessage(failure);
       }
       this.loading.configureModule = false;
+    },
+    statusKind(status) {
+      return { verified: "green", failed: "red" }[status] || "warm-gray";
+    },
+    findCheck(dom, name) {
+      return (dom.checks || []).find((c) => c.name === name);
+    },
+    checkKind(dom, name) {
+      const check = this.findCheck(dom, name);
+      if (!check) {
+        return "warm-gray";
+      }
+      return { pass: "green", fail: "red" }[check.status] || "warm-gray";
+    },
+    checkLabel(dom, rec) {
+      const check = this.findCheck(dom, rec.check);
+      const state = check ? check.status : "unchecked";
+      return (
+        this.$t("domains.check_" + rec.check) +
+        (rec.required ? "" : " (" + this.$t("domains.recommended") + ")") +
+        ": " +
+        this.$t("domains.check_status_" + state)
+      );
+    },
+    async validateDomain(dom) {
+      this.error.validate = "";
+      this.loading.validate = dom.domain;
+      try {
+        await this.runModuleTask(
+          "validate-domain",
+          { domain: dom.domain },
+          { title: this.$t("action.validate-domain"), hidden: false }
+        );
+        this.getConfiguration();
+      } catch (failure) {
+        this.error.validate = this.taskErrorMessage(failure);
+      }
+      this.loading.validate = "";
+    },
+    async removeDomain(dom, index) {
+      if (!dom.owner) {
+        // administrator domains are saved with the page
+        this.domains.splice(index, 1);
+        return;
+      }
+      if (!window.confirm(this.$t("domains.remove_api_confirm", dom))) {
+        return;
+      }
+      this.loading.remove = dom.domain;
+      try {
+        await this.runModuleTask(
+          "remove-domain",
+          { domain: dom.domain },
+          { title: this.$t("action.remove-domain"), hidden: false }
+        );
+        this.getConfiguration();
+      } catch (failure) {
+        this.error.validate = this.taskErrorMessage(failure);
+      }
+      this.loading.remove = "";
     },
     async generateKey(dom, existing) {
       if (
@@ -367,6 +485,30 @@ export default {
 }
 .port {
   max-width: 8rem;
+}
+.tags {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: $spacing-02;
+}
+.checked {
+  font-size: 0.75rem;
+  color: $text-02;
+  margin-left: $spacing-03;
+}
+.record-head {
+  display: flex;
+  align-items: center;
+  gap: $spacing-03;
+  margin-bottom: $spacing-02;
+}
+.purpose {
+  font-size: 0.75rem;
+  color: $text-02;
+}
+.mg-right {
+  margin-right: $spacing-03;
 }
 .label {
   font-size: 0.75rem;

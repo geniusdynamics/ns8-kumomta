@@ -103,6 +103,17 @@
               />
             </template>
             <NsInlineNotification
+              v-if="unavailableItems.length"
+              kind="warning"
+              :title="$t('openbao.items_unavailable_title')"
+              :description="
+                $t('openbao.items_unavailable_description', {
+                  items: unavailableItems.join(', '),
+                })
+              "
+              :showCloseButton="false"
+            />
+            <NsInlineNotification
               v-if="error.configureModule"
               kind="error"
               :title="$t('action.configure-module')"
@@ -120,6 +131,64 @@
         </cv-tile>
       </cv-column>
     </cv-row>
+    <!-- turning OpenBao off: secrets that exist only in OpenBao -->
+    <NsModal
+      size="default"
+      kind="danger"
+      :visible="disableModal.visible"
+      :primaryButtonDisabled="!disableModal.copyable || loading.copy"
+      :isLoading="loading.copy"
+      @modal-hidden="disableModal.visible = false"
+      @other-btn-click="disableModal.visible = false"
+      @secondary-click="disableAnyway"
+      @primary-click="copyThenDisable"
+    >
+      <template slot="title">{{ $t("openbao.disable_title") }}</template>
+      <template slot="content">
+        <NsInlineNotification
+          kind="warning"
+          :title="$t('openbao.disable_warning_title')"
+          :description="$t('openbao.disable_warning_description')"
+          :showCloseButton="false"
+        />
+        <ul class="items mg-bottom">
+          <li v-for="item in disableModal.items" :key="item.kind + item.name">
+            <strong>{{ $t("openbao.item_" + item.kind) }}</strong>
+            <span v-if="item.kind === 'dkim_key'">: {{ item.name }}</span>
+            <span class="path">({{ item.path }})</span>
+            <NsTag
+              v-if="!item.readable"
+              kind="red"
+              :label="$t('openbao.not_readable')"
+            />
+          </li>
+        </ul>
+        <p v-if="disableModal.copyable">
+          {{ $t("openbao.copy_description") }}
+        </p>
+        <NsInlineNotification
+          v-else
+          kind="error"
+          :title="$t('openbao.copy_impossible')"
+          :description="$t('openbao.copy_impossible_description')"
+          :showCloseButton="false"
+        />
+        <NsInlineNotification
+          v-if="error.copy"
+          kind="error"
+          :title="$t('action.copy-openbao-to-local')"
+          :description="error.copy"
+          :showCloseButton="false"
+        />
+      </template>
+      <template slot="other-button">{{ $t("common.cancel") }}</template>
+      <template slot="secondary-button">{{
+        $t("openbao.disable_anyway")
+      }}</template>
+      <template slot="primary-button">{{
+        $t("openbao.copy_and_disable")
+      }}</template>
+    </NsModal>
   </cv-grid>
 </template>
 
@@ -152,6 +221,11 @@ export default {
       q: { page: "openbao" },
       urlCheckInterval: null,
       vault_enabled: false,
+      // vault_enabled as saved: the warning applies when it goes off
+      vault_enabled_saved: false,
+      disableModal: { visible: false, items: [], copyable: false },
+      // configure-module warning: secrets left behind in OpenBao
+      unavailableItems: [],
       vault_address: "",
       vault_token: "",
       vault_token_set: false,
@@ -159,10 +233,15 @@ export default {
       vault_path: "kumomta",
       vault_key: "",
       servers: [],
-      loading: { getConfiguration: false, configureModule: false },
+      loading: {
+        getConfiguration: false,
+        configureModule: false,
+        copy: false,
+      },
       error: {
         getConfiguration: "",
         configureModule: "",
+        copy: "",
         vault_address: "",
         vault_token: "",
         vault_mount: "",
@@ -198,6 +277,7 @@ export default {
       try {
         const c = await this.runModuleTask("get-configuration");
         this.vault_enabled = c.vault_enabled;
+        this.vault_enabled_saved = c.vault_enabled;
         this.vault_address = c.vault_address;
         this.vault_token_set = c.vault_token_set;
         this.vault_mount = c.vault_mount;
@@ -222,6 +302,52 @@ export default {
     },
     async save() {
       this.clearErrors(this);
+      if (this.vault_enabled_saved && !this.vault_enabled) {
+        // Turning OpenBao off: warn about the secrets that exist only there
+        this.loading.configureModule = true;
+        let listing = null;
+        try {
+          listing = await this.runModuleTask("list-openbao-only-secrets");
+        } catch (failure) {
+          this.error.configureModule = this.taskErrorMessage(failure);
+          this.loading.configureModule = false;
+          return;
+        }
+        this.loading.configureModule = false;
+        if (listing.items.length) {
+          this.disableModal = {
+            visible: true,
+            items: listing.items,
+            copyable: listing.copyable,
+          };
+          return;
+        }
+      }
+      await this.configure();
+    },
+    async disableAnyway() {
+      this.disableModal.visible = false;
+      await this.configure();
+    },
+    async copyThenDisable() {
+      this.error.copy = "";
+      this.loading.copy = true;
+      try {
+        await this.runModuleTask(
+          "copy-openbao-to-local",
+          {},
+          { title: this.$t("action.copy-openbao-to-local"), hidden: false }
+        );
+      } catch (failure) {
+        this.error.copy = this.taskErrorMessage(failure);
+        this.loading.copy = false;
+        return;
+      }
+      this.loading.copy = false;
+      this.disableModal.visible = false;
+      await this.configure();
+    },
+    async configure() {
       if (this.vault_enabled && !this.vault_address) {
         this.error.vault_address = this.$t("common.required");
         this.focusElement("vault_address");
@@ -244,10 +370,14 @@ export default {
       }
       this.loading.configureModule = true;
       try {
-        await this.runModuleTask("configure-module", data, {
+        const out = await this.runModuleTask("configure-module", data, {
           title: this.$t("openbao.saving"),
           hidden: false,
         });
+        const lost = ((out && out.warnings) || []).find(
+          (w) => w.id === "openbao_items_unavailable"
+        );
+        this.unavailableItems = lost ? lost.items : [];
         this.vault_token = "";
         this.getConfiguration();
       } catch (failure) {
@@ -273,6 +403,18 @@ export default {
 .label {
   font-size: 0.75rem;
   margin-bottom: $spacing-03;
+}
+.items {
+  margin-top: $spacing-05;
+  list-style: disc;
+  padding-left: $spacing-06;
+}
+.items li {
+  margin-bottom: $spacing-03;
+}
+.path {
+  margin-left: $spacing-03;
+  color: $text-02;
 }
 .servers {
   display: flex;

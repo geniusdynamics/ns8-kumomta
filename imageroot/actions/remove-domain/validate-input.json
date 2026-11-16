@@ -1,0 +1,10 @@
+{
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "Remove a sending domain",
+    "$id": "http://nethserver.org/json-schema/task/input/kumomta/remove-domain",
+    "examples": [{"domain": "example.org"}],
+    "type": "object",
+    "required": ["domain"],
+    "properties": {"domain": {"type": "string", "minLength": 3, "maxLength": 253}},
+    "additionalProperties": false
+}

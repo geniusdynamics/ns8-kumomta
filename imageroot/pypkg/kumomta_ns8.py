@@ -13,6 +13,9 @@ Secrets live in 0600 files under state/secrets and state/openbao.env.
 
 import base64
 import copy
+import datetime
+import fcntl
+import hmac
 import hashlib
 import ipaddress
 import json
@@ -36,6 +39,7 @@ TLS_DIR = "tls"                 # -> /opt/kumomta/etc/tls
 OPENBAO_ENV = "openbao.env"     # EnvironmentFile of kumomta.service
 API_ENV = "secrets/api.env"     # credentials of the local HTTP API
 RESTART_STAMP = ".init-hash"    # hash of the settings read only at startup
+WARNINGS_FILE = ".configure-warnings.json"  # configure-module output
 
 # Paths inside the container
 C_POLICY = "/opt/kumomta/etc/policy"
@@ -45,6 +49,11 @@ C_TLS = "/opt/kumomta/etc/tls"
 
 API_USER = "ns8-admin"
 METRICS_USER = "metrics"
+RESERVED_NAMES = [API_USER, METRICS_USER]
+SETTINGS_LOCK = ".settings.lock"
+INTEGRATION_SCOPES = ["inject", "smtp", "domains"]
+DOMAIN_STATUSES = ["pending", "verified", "failed"]
+RETURN_PATH_PREFIX = "bounces"   # <prefix>.<domain> CNAME <bounce_domain>
 
 SMARTHOST_TLS = {
     "required": "Required",
@@ -86,7 +95,7 @@ DEFAULTS = {
     "max_age": "5d",
     "webhook_enabled": False,
     "webhook_url": "",
-    "webhook_record_types": ["Delivery", "Bounce", "TransientFailure", "Expiration"],
+    "webhook_record_types": ["Delivery", "Bounce", "TransientFailure", "Expiration", "OOB", "Feedback"],
     "vault_enabled": False,
     "vault_address": "",
     "vault_mount": "secret",
@@ -94,15 +103,27 @@ DEFAULTS = {
     "vault_key": "",
     "metrics_host": "",
     "metrics_allowlist": [],
+    # Testing: accept and discard every outbound message (no delivery)
+    "sink_enabled": False,
+    # Sending platforms: integration credentials (hashes in secrets),
+    # HTTPS API host name, sending domain policy
+    "integrations": [],               # [{name, tenant, scopes, max_message_rate}]
+    "api_host": "",
+    "api_allowlist": [],
+    "require_verified_domains": True,
+    "spf_include": "",                # SPF mechanism to suggest, default a:<hostname>
+    "bounce_domain": "",              # return path / OOB / FBL domain, empty disables
     # Non-secret markers of the write-only secrets
     "smarthost_password_set": False,
     "webhook_token_set": False,
     "metrics_password_set": False,
+    "webhook_signing_secret_set": False,
 }
 
 # configure-module fields that are secrets: written to state/secrets or
 # OpenBao, never returned
-SECRET_FIELDS = ["smarthost_password", "webhook_token", "vault_token", "metrics_password"]
+SECRET_FIELDS = ["smarthost_password", "webhook_token", "vault_token", "metrics_password",
+                 "webhook_signing_secret"]
 
 RATE_RE = re.compile(r"^[0-9]+/(s|sec|second|m|min|minute|h|hr|hour|d|day)$")
 DURATION_RE = re.compile(r"^[0-9]+ ?(s|sec|secs|seconds|m|min|mins|minutes|h|hr|hrs|hours|d|day|days|w|week|weeks)$")
@@ -110,6 +131,8 @@ HOSTNAME_RE = re.compile(r"^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+
 DOMAIN_RE = re.compile(r"^(\*\.)?([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$")
 SELECTOR_RE = re.compile(r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$")
 USERNAME_RE = re.compile(r"^[A-Za-z0-9._@+-]{1,128}$")
+INTEGRATION_RE = re.compile(r"^[a-z0-9][a-z0-9-]{2,31}$")
+TENANT_RE = re.compile(r"^[A-Za-z0-9._-]{0,64}$")
 
 
 def log(message):
@@ -132,6 +155,18 @@ def load_settings():
 
 def save_settings(settings):
     write_file(SETTINGS_FILE, json.dumps(settings, indent=2, sort_keys=True) + "\n", 0o644)
+
+
+def settings_lock():
+    """Exclusive lock of the settings (configure-module, the domain actions
+    and the API daemon): keep the returned file open while modifying"""
+    fp = open(SETTINGS_LOCK, "a")
+    fcntl.flock(fp, fcntl.LOCK_EX)
+    return fp
+
+
+def utcnow():
+    return datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def write_file(path, content, mode=0o644):
@@ -215,6 +250,46 @@ def write_smtp_users(users):
     toml = {name: {"salt": u["salt"], "sha256": u["sha256"]} for name, u in sorted(users.items())}
     changed |= write_file(os.path.join(SECRETS_DIR, "smtp_users.toml"), toml_dumps({"user": toml}), 0o600)
     return changed
+
+
+def read_integrations_secrets():
+    """{name: {salt, sha256}} of the integration credentials (0600)"""
+    try:
+        with open(os.path.join(SECRETS_DIR, "integrations.json")) as fp:
+            return json.load(fp)
+    except FileNotFoundError:
+        return {}
+
+
+def write_integrations(settings, hashes):
+    """Write the credentials and their policy for KumoMTA (0600 TOML)"""
+    os.makedirs(SECRETS_DIR, mode=0o700, exist_ok=True)
+    changed = write_file(os.path.join(SECRETS_DIR, "integrations.json"),
+                         json.dumps(hashes, indent=1, sort_keys=True), 0o600)
+    table = {}
+    for integ in settings["integrations"]:
+        cred = hashes.get(integ["name"])
+        if not cred:
+            continue
+        table[integ["name"]] = {
+            "salt": cred["salt"],
+            "sha256": cred["sha256"],
+            "tenant": integ.get("tenant") or "",
+            "scopes": list(integ.get("scopes") or []),
+            "max_message_rate": integ.get("max_message_rate") or "",
+        }
+    changed |= write_file(os.path.join(SECRETS_DIR, "integrations.toml"),
+                          toml_dumps({"integration": table}), 0o600)
+    return changed
+
+
+def check_integration_password(name, password):
+    """True if name/password is a valid integration credential"""
+    cred = read_integrations_secrets().get(name)
+    if not cred or not password:
+        return False
+    _, digest = hash_password(password, cred["salt"])
+    return hmac.compare_digest(digest, cred["sha256"])
 
 
 def read_openbao_env():
@@ -466,6 +541,357 @@ def openbao_write(settings, path, value, env=None):
         raise RuntimeError(f"cannot reach OpenBao: {ex}") from None
 
 
+def openbao_read(settings, path, env=None):
+    """Read the field of a KV v2 secret. Raises RuntimeError"""
+    env = env if env is not None else read_openbao_env()
+    address = env.get("VAULT_ADDR", "").rstrip("/")
+    token = env.get("VAULT_TOKEN", "")
+    if not address or not token:
+        raise RuntimeError("OpenBao address or token not set")
+    field = settings["vault_key"] or "key"
+    url = f"{address}/v1/{settings['vault_mount'].strip('/')}/data/{path}"
+    req = urllib.request.Request(url, method="GET", headers={"X-Vault-Token": token})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            payload = json.loads(resp.read() or b"{}")
+    except urllib.error.HTTPError as ex:
+        raise RuntimeError(f"OpenBao answered {ex.code} for {path}") from None
+    except (urllib.error.URLError, OSError, ValueError) as ex:
+        raise RuntimeError(f"cannot reach OpenBao: {ex}") from None
+    value = ((payload.get("data") or {}).get("data") or {}).get(field)
+    if not isinstance(value, str) or not value:
+        raise RuntimeError(f"no '{field}' field in {path}")
+    return value
+
+
+def vault_only_items(settings):
+    """Secrets that exist only in OpenBao: without OpenBao, KumoMTA cannot
+    use them. Names and paths only, never the values."""
+    if not settings["vault_enabled"]:
+        return []
+    items = []
+    for dom in settings["domains"]:
+        keyfile, pubfile = dkim_paths(dom["domain"], dom["selector"])
+        if os.path.exists(pubfile) and not os.path.exists(keyfile):
+            items.append({
+                "kind": "dkim_key",
+                "name": f"{dom['selector']}._domainkey.{dom['domain']}",
+                "domain": dom["domain"],
+                "selector": dom["selector"],
+                "path": dkim_vault_path(settings, dom["domain"], dom["selector"]),
+            })
+    if settings["smarthost_password_set"] and not read_secret("smarthost_password"):
+        items.append({"kind": "smarthost_password", "name": "smarthost_password",
+                      "path": openbao_secret_path(settings, "smarthost")})
+    if settings["webhook_token_set"] and not read_secret("webhook_token"):
+        items.append({"kind": "webhook_token", "name": "webhook_token",
+                      "path": openbao_secret_path(settings, "webhook")})
+    if settings.get("webhook_signing_secret_set") and not read_secret("webhook_signing_secret"):
+        items.append({"kind": "webhook_signing_secret", "name": "webhook_signing_secret",
+                      "path": openbao_secret_path(settings, "webhook_signing")})
+    return items
+
+
+def copy_vault_item_to_local(settings, item, env=None):
+    """Copy one item of vault_only_items() into its local 0600 file.
+    Raises RuntimeError"""
+    value = openbao_read(settings, item["path"], env)
+    if item["kind"] == "dkim_key":
+        try:
+            public = public_from_private(value)
+        except Exception:
+            raise RuntimeError("the OpenBao value is not a PEM private key") from None
+        _, pubfile = dkim_paths(item["domain"], item["selector"])
+        with open(pubfile) as fp:
+            if fp.read().strip() != public:
+                raise RuntimeError("the OpenBao key does not match the published DKIM record")
+        store_dkim_private(item["domain"], item["selector"], value)
+    elif item["kind"] == "smarthost_password":
+        write_secret("smarthost_password", value)
+    elif item["kind"] in ("webhook_token", "webhook_signing_secret"):
+        write_secret(item["kind"], value)
+    else:
+        raise RuntimeError(f"unknown item kind {item['kind']}")
+
+
+# --------------------------------------------------------------------------
+# Sending domains: DKIM keys, DNS records, validation
+# --------------------------------------------------------------------------
+
+class DomainError(Exception):
+    """A domain request the caller can fix: code is the validation code"""
+
+    def __init__(self, code, value=""):
+        super().__init__(code)
+        self.code = code
+        self.value = value
+
+
+def install_dkim_key(settings, domain, selector, pem=None):
+    """Store a DKIM private key (new one unless pem is given) in OpenBao
+    or a local 0600 file, and its public key. Return the key location.
+    Raises RuntimeError (OpenBao) or DomainError (invalid pem)"""
+    if pem is None:
+        pem, public = generate_dkim_key()
+    else:
+        try:
+            public = public_from_private(pem)
+        except Exception:
+            raise DomainError("invalid_private_key") from None
+    keyfile, _ = dkim_paths(domain, selector)
+    if settings["vault_enabled"]:
+        openbao_write(settings, dkim_vault_path(settings, domain, selector), pem)
+        if os.path.exists(keyfile):
+            os.unlink(keyfile)
+        location = "openbao"
+    else:
+        store_dkim_private(domain, selector, pem)
+        location = "local"
+    store_dkim_public(domain, selector, public)
+    return location
+
+
+def remove_dkim_files(domain, selector):
+    keyfile, pubfile = dkim_paths(domain, selector)
+    for path in (keyfile, pubfile):
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+    try:
+        os.rmdir(os.path.dirname(keyfile))
+    except OSError:
+        pass
+
+
+def key_location(settings, dom):
+    keyfile, pubfile = dkim_paths(dom["domain"], dom["selector"])
+    if settings["vault_enabled"]:
+        if os.path.exists(keyfile):
+            return "local_not_in_openbao"
+        return "openbao" if os.path.exists(pubfile) else "missing"
+    return "local" if os.path.exists(keyfile) else "missing"
+
+
+def spf_mechanism(settings):
+    return settings["spf_include"] or f"a:{settings['hostname']}"
+
+
+def domain_records(settings, dom):
+    """DNS records to publish for a sending domain"""
+    domain = dom["domain"]
+    records = []
+    dkim = dkim_record(domain, dom["selector"])
+    if dkim:
+        records.append(dict(dkim, check="dkim", required=True,
+                            purpose="DKIM public key of the selector"))
+    records.append({
+        "check": "spf", "required": True, "type": "TXT", "name": domain,
+        "value": f"v=spf1 {spf_mechanism(settings)} ~all",
+        "purpose": f"SPF: authorize this MTA. Add {spf_mechanism(settings)} to the existing SPF record, if any",
+    })
+    records.append({
+        "check": "dmarc", "required": False, "type": "TXT", "name": f"_dmarc.{domain}",
+        "value": f"v=DMARC1; p=none; rua=mailto:dmarc@{domain}",
+        "purpose": "DMARC policy (recommended): start with p=none, then quarantine or reject",
+    })
+    if settings["bounce_domain"]:
+        records.append({
+            "check": "return_path", "required": False, "type": "CNAME",
+            "name": f"{RETURN_PATH_PREFIX}.{domain}", "value": settings["bounce_domain"] + ".",
+            "purpose": f"Return path (recommended): envelope senders @{RETURN_PATH_PREFIX}.{domain} "
+                       "bring bounces and feedback reports back to this MTA",
+        })
+    return records
+
+
+def find_domain(settings, domain):
+    domain = domain.lower().rstrip(".")
+    return next((d for d in settings["domains"] if d["domain"] == domain), None)
+
+
+def domain_view(settings, dom):
+    """Public view of a sending domain: no secret"""
+    return {
+        "domain": dom["domain"],
+        "selector": dom["selector"],
+        "owner": dom.get("owner") or "",
+        "tenant": dom.get("tenant") or "",
+        "status": dom.get("status") or "pending",
+        "last_checked": dom.get("last_checked") or "",
+        "checks": dom.get("checks") or [],
+        "key_location": key_location(settings, dom),
+        "dkim_record": dkim_record(dom["domain"], dom["selector"]),
+        "records": domain_records(settings, dom),
+    }
+
+
+def add_domain(settings, domain, selector="", owner="", tenant="", pem=None):
+    """Add a sending domain and install its DKIM key. The caller holds
+    settings_lock() and saves the settings. Raises DomainError"""
+    domain = (domain or "").lower().rstrip(".")
+    selector = (selector or "kumo1").lower()
+    if not DOMAIN_RE.match(domain) or domain.startswith("*."):
+        raise DomainError("invalid_domain", domain)
+    if not SELECTOR_RE.match(selector):
+        raise DomainError("invalid_selector", selector)
+    if not TENANT_RE.match(tenant or ""):
+        raise DomainError("invalid_tenant", tenant)
+    if find_domain(settings, domain):
+        raise DomainError("domain_exists", domain)
+    try:
+        install_dkim_key(settings, domain, selector, pem)
+    except RuntimeError as ex:
+        log(agent.SD_ERR + str(ex))
+        raise DomainError("openbao_write_failed", domain) from None
+    entry = {"domain": domain, "selector": selector, "owner": owner or "",
+             "tenant": tenant or "", "status": "pending", "last_checked": "", "checks": []}
+    settings["domains"] = sorted(settings["domains"] + [entry], key=lambda d: d["domain"])
+    return entry
+
+
+def remove_domain(settings, domain, owner=None):
+    """Remove a sending domain and its local key files. owner restricts the
+    removal to the domains of an integration. Raises DomainError"""
+    dom = find_domain(settings, domain)
+    if not dom or (owner is not None and (dom.get("owner") or "") != owner):
+        raise DomainError("domain_not_found", domain)
+    settings["domains"] = [d for d in settings["domains"] if d["domain"] != dom["domain"]]
+    remove_dkim_files(dom["domain"], dom["selector"])
+    return dom
+
+
+def dns_txt(name, timeout=5.0):
+    """(list of TXT strings, error): error is None, "nxdomain" or a message"""
+    import dns.exception
+    import dns.resolver
+    resolver = dns.resolver.Resolver()
+    resolver.lifetime = timeout
+    resolver.timeout = timeout
+    try:
+        answer = resolver.resolve(name, "TXT")
+    except (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer):
+        return [], "nxdomain"
+    except (dns.exception.DNSException, OSError) as ex:
+        return [], ex.__class__.__name__
+    return [b"".join(r.strings).decode(errors="replace") for r in answer], None
+
+
+def dns_cname(name, timeout=5.0):
+    import dns.exception
+    import dns.resolver
+    resolver = dns.resolver.Resolver()
+    resolver.lifetime = timeout
+    resolver.timeout = timeout
+    try:
+        answer = resolver.resolve(name, "CNAME")
+    except (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer):
+        return [], "nxdomain"
+    except (dns.exception.DNSException, OSError) as ex:
+        return [], ex.__class__.__name__
+    return [str(r.target).rstrip(".").lower() for r in answer], None
+
+
+def dkim_p(value):
+    """The p= tag of a DKIM TXT record, without blanks"""
+    for tag in value.split(";"):
+        key, _, val = tag.strip().partition("=")
+        if key.strip() == "p":
+            return re.sub(r"\s+", "", val)
+    return None
+
+
+def _check(name, required, status, detail):
+    return {"name": name, "required": required, "status": status, "detail": detail}
+
+
+def validate_domain(settings, dom, resolver_txt=dns_txt, resolver_cname=dns_cname):
+    """Check the DNS of a sending domain and update dom in place: status
+    (pending, verified, failed), last_checked and checks. A missing record
+    is pending, a published but different record is failed."""
+    checks = []
+    domain = dom["domain"]
+    _, pubfile = dkim_paths(domain, dom["selector"])
+    try:
+        with open(pubfile) as fp:
+            public = fp.read().strip()
+    except FileNotFoundError:
+        public = None
+    name = f"{dom['selector']}._domainkey.{domain}"
+    values, err = resolver_txt(name)
+    dkim_values = [v for v in values if "p=" in v]
+    if public is None:
+        checks.append(_check("dkim", True, "fail", "no DKIM key: generate it"))
+    elif err:
+        checks.append(_check("dkim", True, "missing", f"{name}: no TXT record ({err})"))
+    elif any(dkim_p(v) == public for v in dkim_values):
+        checks.append(_check("dkim", True, "pass", f"{name} matches the key"))
+    elif dkim_values:
+        checks.append(_check("dkim", True, "fail", f"{name} publishes another key"))
+    else:
+        checks.append(_check("dkim", True, "missing", f"{name}: no DKIM TXT record"))
+
+    mechanism = spf_mechanism(settings).lower()
+    values, err = resolver_txt(domain)
+    spf = [v for v in values if v.lower().startswith("v=spf1")]
+    if err or not spf:
+        checks.append(_check("spf", True, "missing", f"{domain}: no SPF record" + (f" ({err})" if err else "")))
+    elif len(spf) > 1:
+        checks.append(_check("spf", True, "fail", f"{domain}: more than one SPF record"))
+    elif mechanism in spf[0].lower().split():
+        checks.append(_check("spf", True, "pass", f"SPF authorizes {mechanism}"))
+    else:
+        checks.append(_check("spf", True, "fail", f"SPF does not include {mechanism}"))
+
+    values, err = resolver_txt(f"_dmarc.{domain}")
+    dmarc = [v for v in values if v.lower().startswith("v=dmarc1")]
+    if dmarc:
+        checks.append(_check("dmarc", False, "pass", "DMARC record found"))
+    else:
+        checks.append(_check("dmarc", False, "missing", f"_dmarc.{domain}: no DMARC record (recommended)"))
+
+    if settings["bounce_domain"]:
+        name = f"{RETURN_PATH_PREFIX}.{domain}"
+        targets, err = resolver_cname(name)
+        if settings["bounce_domain"].lower() in targets:
+            checks.append(_check("return_path", False, "pass", f"{name} points to {settings['bounce_domain']}"))
+        elif targets:
+            checks.append(_check("return_path", False, "fail", f"{name} points elsewhere"))
+        else:
+            checks.append(_check("return_path", False, "missing", f"{name}: no CNAME (recommended)"))
+
+    required = [c for c in checks if c["required"]]
+    if all(c["status"] == "pass" for c in required):
+        status = "verified"
+    elif any(c["status"] == "fail" for c in required):
+        status = "failed"
+    else:
+        status = "pending"
+    dom.update({"status": status, "last_checked": utcnow(), "checks": checks})
+    return dom
+
+
+def validate_domains(names=None, owner=None):
+    """Validate the given domains (all if names is None; only those of
+    owner if set) without holding the lock during the DNS queries, then
+    store the results and apply the policy. Return the domain views."""
+    settings = load_settings()
+    targets = [copy.deepcopy(d) for d in settings["domains"]
+               if (names is None or d["domain"] in names)
+               and (owner is None or (d.get("owner") or "") == owner)]
+    results = {d["domain"]: validate_domain(settings, d) for d in targets}
+    with settings_lock():
+        settings = load_settings()
+        for dom in settings["domains"]:
+            res = results.get(dom["domain"])
+            if res and res["selector"] == dom["selector"]:
+                for key in ("status", "last_checked", "checks"):
+                    dom[key] = res[key]
+        save_settings(settings)
+        apply_policy()
+    return [domain_view(settings, d) for d in settings["domains"] if d["domain"] in results]
+
+
 # --------------------------------------------------------------------------
 # Rendering of the KumoMTA policy
 # --------------------------------------------------------------------------
@@ -516,6 +942,7 @@ def render(settings, template_path=None):
         "metrics_password": f"{C_SECRETS}/metrics_password",
         "smarthost_password": keysource(settings, "smarthost", "smarthost_password"),
         "webhook_token": keysource(settings, "webhook", "webhook_token"),
+        "webhook_signing_secret": keysource(settings, "webhook_signing", "webhook_signing_secret"),
     }
     generated = (
         "-- Settings read only at startup (a change restarts kumod)\n"
@@ -527,7 +954,14 @@ def render(settings, template_path=None):
     )
     files = {"init.lua": template.replace("--@@GENERATED@@", generated)}
     with open(os.path.join(os.path.dirname(template_path), "acl.toml")) as fp:
-        files["acl.toml"] = fp.read()
+        acl = fp.read()
+    # HTTP injection by the integration credentials with the inject scope
+    for integ in settings["integrations"]:
+        if "inject" in (integ.get("scopes") or []):
+            acl += ("\n[[acl.\"http_listener/*/api/inject\"]]\nallow = true\n"
+                    "privileges = [\"POST\"]\n"
+                    f"identity.Individual = {toml_value(integ['name'])}\n")
+    files["acl.toml"] = acl
 
     head = "Generated by ns8-kumomta configure-module: do not edit, changes are overwritten."
 
@@ -565,7 +999,12 @@ def render(settings, template_path=None):
             base["vault_key"] = settings["vault_key"]
     dkim_domains = {}
     for dom in settings["domains"]:
-        entry = {"selector": dom["selector"]}
+        entry = {
+            "selector": dom["selector"],
+            "owner": dom.get("owner") or "",
+            "tenant": dom.get("tenant") or "",
+            "verified": (dom.get("status") == "verified"),
+        }
         if not settings["vault_enabled"]:
             entry["filename"] = f"{C_DKIM}/{dom['domain']}/{dom['selector']}.key"
         dkim_domains[dom["domain"]] = entry
@@ -587,6 +1026,7 @@ def render(settings, template_path=None):
             "username": settings["smarthost_username"],
         })
     files["queues.toml"] = toml_dumps({
+        "sink": {"enabled": bool(settings["sink_enabled"])},
         "default": {
             "egress_pool": "default",
             "retry_interval": settings["retry_interval"],
@@ -612,35 +1052,65 @@ def render(settings, template_path=None):
     files["webhook.toml"] = toml_dumps({
         "url": settings["webhook_url"],
         "token": bool(settings.get("webhook_token_set")),
+        "signing": bool(settings.get("webhook_signing_secret_set")),
     }, header=head)
+
+    # Sending platforms: domain policy of the integration credentials,
+    # return path / bounce / feedback domain
+    managed = sorted(d["domain"] for d in settings["domains"])
+    files["platform.toml"] = toml_dumps({
+        "require_verified_domains": bool(settings["require_verified_domains"]),
+        "bounce_domain": settings["bounce_domain"],
+        "return_path_domains": [f"{RETURN_PATH_PREFIX}.{d}" for d in managed] if settings["bounce_domain"] else [],
+    }, header=head + "\nPolicy of the integration credentials (HTTP injection, SMTP), bounce and feedback domains.")
     return files
 
 
-def write_config(settings, template_path=None):
-    """Write the policy directory. Return (changed, restart_required)"""
+def write_config(settings, template_path=None, stamp=True):
+    """Write the policy directory. Return (changed, restart_required).
+    stamp=False leaves the restart stamp to configure-module"""
     os.makedirs(CONFIG_DIR, exist_ok=True)
     files = render(settings, template_path)
     changed = False
     for name, content in files.items():
         changed |= write_file(os.path.join(CONFIG_DIR, name), content, 0o644)
     # Settings read only at startup, the environment of kumod included
-    stamp = hashlib.sha256(json.dumps({
+    digest = hashlib.sha256(json.dumps({
         "init": init_settings(settings),
         "openbao": read_openbao_env() if settings["vault_enabled"] else {},
     }, sort_keys=True).encode()).hexdigest()
     try:
         with open(RESTART_STAMP) as fp:
-            restart = fp.read().strip() != stamp
+            restart = fp.read().strip() != digest
     except FileNotFoundError:
         restart = True
-    if restart:
-        write_file(RESTART_STAMP, stamp + "\n", 0o600)
+    if restart and stamp:
+        write_file(RESTART_STAMP, digest + "\n", 0o600)
     return changed, restart
 
 
 # --------------------------------------------------------------------------
 # Local HTTP API of kumod (127.0.0.1 only, HTTP basic authentication)
 # --------------------------------------------------------------------------
+
+def daemon_port():
+    """Port of the domain management daemon: the second TCP port"""
+    ports = [p for p in os.environ.get("TCP_PORTS", "").split(",") if p]
+    return ports[1] if len(ports) > 1 else ""
+
+
+def apply_policy():
+    """Render the policy and apply it live (configuration epoch bump), for
+    the changes outside configure-module (domain actions, API daemon).
+    Settings read at startup do not change there."""
+    changed, _ = write_config(load_settings(), stamp=False)
+    if changed:
+        try:
+            api_request("/api/admin/bump-config-epoch", method="POST")
+        except Exception as ex:
+            log(agent.SD_WARNING + f"Configuration epoch bump failed: {ex}")
+    return changed
+
 
 def api_request(path, method="GET", body=None, timeout=10):
     env = agent.read_envfile(API_ENV)
@@ -665,5 +1135,8 @@ def configure_payload(settings):
     data = {k: v for k, v in settings.items() if k in DEFAULTS and not k.endswith("_set")}
     data["lets_encrypt"] = False
     data["smtp_users"] = [{"username": name} for name in sorted(read_smtp_users())]
-    data["domains"] = [{"domain": d["domain"], "selector": d["selector"]} for d in settings["domains"]]
+    data["domains"] = [{"domain": d["domain"], "selector": d["selector"]}
+                       for d in settings["domains"] if not d.get("owner")]
+    data["integrations"] = [{k: i.get(k) for k in ("name", "tenant", "scopes", "max_message_rate")}
+                            for i in settings["integrations"]]
     return data

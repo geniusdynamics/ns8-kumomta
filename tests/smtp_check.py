@@ -10,6 +10,9 @@
 #   smtp_check.py submit HOST PORT USER PASSWORD FROM TO
 #   smtp_check.py badauth HOST PORT USER
 #   smtp_check.py relay HOST PORT FROM TO     (expects relaying denied)
+#   smtp_check.py rcpt HOST PORT FROM TO [SOURCE_IP]
+#       prints the RCPT TO reply code, sends no message
+#   smtp_check.py submit-plain HOST PORT FROM TO  (no AUTH, e.g. loopback)
 
 import smtplib
 import socket
@@ -64,5 +67,26 @@ if cmd == "relay":
             sys.exit(0)
     print("relaying was accepted")
     sys.exit(1)
+
+if cmd == "rcpt":
+    mfrom, rcpt = sys.argv[4:6]
+    source = (sys.argv[6], 0) if len(sys.argv) > 6 and sys.argv[6] else None
+    with smtplib.SMTP(host, port, timeout=30, source_address=source) as smtp:
+        smtp.ehlo("ci.ns8-ci.test")
+        smtp.mail(mfrom)
+        code, text = smtp.rcpt(rcpt)
+        smtp.rset()
+    print(code, text.decode(errors="replace"))
+    sys.exit(0)
+
+if cmd == "submit-plain":
+    mfrom, rcpt = sys.argv[4:6]
+    msg = (f"From: {mfrom}\r\nTo: {rcpt}\r\nSubject: ns8-kumomta CI\r\n"
+           f"Message-ID: <ci-plain-{rcpt}>\r\n\r\nTest message\r\n")
+    with smtplib.SMTP(host, port, timeout=30) as smtp:
+        smtp.ehlo("ci.ns8-ci.test")
+        refused = smtp.sendmail(mfrom, [rcpt], msg)
+    print("accepted", refused)
+    sys.exit(0 if not refused else 1)
 
 sys.exit(2)

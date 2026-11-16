@@ -1,0 +1,22 @@
+#!/usr/bin/env python3
+
+#
+# Copyright (C) 2026 Genius Dynamics
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+
+# Action output: the warnings collected by 10configure, e.g. the secrets
+# that exist only in OpenBao when OpenBao is turned off, or sink mode on.
+
+import json
+import os
+import sys
+import kumomta_ns8 as kumo
+
+try:
+    with open(kumo.WARNINGS_FILE) as fp:
+        warnings = json.load(fp)
+    os.unlink(kumo.WARNINGS_FILE)
+except (FileNotFoundError, ValueError):
+    warnings = []
+json.dump({"warnings": warnings}, fp=sys.stdout)

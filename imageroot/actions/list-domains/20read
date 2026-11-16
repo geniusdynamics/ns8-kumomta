@@ -1,0 +1,23 @@
+#!/usr/bin/env python3
+
+#
+# Copyright (C) 2026 Genius Dynamics
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+
+# Sending domains with their owner, tenant, DNS status, last check and the
+# DNS records to publish. No secrets: readers can run it.
+
+import json
+import sys
+import kumomta_ns8 as kumo
+
+request = {}
+try:
+    request = json.load(sys.stdin) or {}
+except ValueError:
+    pass
+settings = kumo.load_settings()
+domains = [kumo.domain_view(settings, d) for d in settings["domains"]
+           if "owner" not in request or (d.get("owner") or "") == request["owner"]]
+json.dump({"domains": domains, "require_verified_domains": bool(settings["require_verified_domains"])}, fp=sys.stdout)

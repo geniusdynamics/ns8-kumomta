@@ -1,0 +1,9 @@
+{
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "Validate the DNS records of sending domains",
+    "$id": "http://nethserver.org/json-schema/task/input/kumomta/validate-domain",
+    "examples": [{"domain": "example.org"}, {}],
+    "type": "object",
+    "properties": {"domain": {"type": "string", "minLength": 3, "maxLength": 253, "description": "Omit to check every domain"}},
+    "additionalProperties": false
+}

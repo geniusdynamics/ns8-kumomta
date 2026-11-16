@@ -18,24 +18,21 @@ settings = kumo.load_settings()
 config = {k: settings[k] for k in kumo.DEFAULTS if not k.endswith("_set")}
 
 config["smtp_users"] = [{"username": name} for name in sorted(kumo.read_smtp_users())]
-domains = []
-for dom in settings["domains"]:
-    keyfile, pubfile = kumo.dkim_paths(dom["domain"], dom["selector"])
-    if settings["vault_enabled"]:
-        if os.path.exists(keyfile):
-            location = "local_not_in_openbao" # generate-dkim-key moves it
-        else:
-            location = "openbao" if os.path.exists(pubfile) else "missing"
-    else:
-        location = "local" if os.path.exists(keyfile) else "missing"
-    domains.append(dict(dom, dkim_record=kumo.dkim_record(dom["domain"], dom["selector"]),
-                        key_location=location))
+domains = [kumo.domain_view(settings, dom) for dom in settings["domains"]]
 config["domains"] = domains
 
 config["smarthost_password_set"] = bool(settings["smarthost_password_set"])
 config["webhook_token_set"] = bool(settings["webhook_token_set"])
 config["metrics_password_set"] = bool(settings["metrics_password_set"])
 config["vault_token_set"] = bool(kumo.read_openbao_env().get("VAULT_TOKEN"))
+config["webhook_signing_secret_set"] = bool(settings["webhook_signing_secret_set"])
+hashes = kumo.read_integrations_secrets()
+config["integrations"] = [dict(i, password_set=i["name"] in hashes) for i in settings["integrations"]]
+config["spf_mechanism"] = kumo.spf_mechanism(settings) if settings["hostname"] else ""
+config["api_endpoints"] = {
+    "inject": f"https://{settings['api_host']}/api/inject/v1",
+    "domains": f"https://{settings['api_host']}/api/v1/domains",
+} if settings["api_host"] else {}
 
 # Facts for the UI
 cnet, node_address = kumo.cluster_info()
@@ -47,5 +44,12 @@ try:
 except Exception:
     config["mail_modules"] = []
 config["api_port"] = int(os.environ.get("TCP_PORT", 0))
+
+# Conditions the UI shows as a banner on every page
+warnings = []
+if settings["sink_enabled"]:
+    warnings.append({"id": "sink_mode_enabled",
+                     "message": "Sink mode is on: outbound mail is accepted and discarded, nothing is delivered"})
+config["warnings"] = warnings
 
 json.dump(config, fp=sys.stdout)

@@ -78,6 +78,78 @@ local function is_trusted(meta_source)
   return false
 end
 
+-- Integration credentials of the sending platforms (hashes, tenant,
+-- scopes, rate): a 0600 file of the secrets directory
+local function integrations()
+  return load_toml(SECRETS .. '/integrations.toml').integration or {}
+end
+
+local function integration_allows(name, scope)
+  local integ = integrations()[name]
+  if not integ then
+    return nil
+  end
+  for _, s in ipairs(integ.scopes or {}) do
+    if s == scope then
+      return integ
+    end
+  end
+  return nil
+end
+
+local function check_password(entry, password)
+  return entry ~= nil
+    and password ~= nil
+    and password ~= ''
+    and kumo.digest.sha256(entry.salt .. password).hex == entry.sha256
+end
+
+-- Messages of an integration: the From domain must be a sending domain
+-- of this MTA, owned by the integration or by the administrator, and
+-- verified unless require_verified_domains is off. The tenant of the
+-- integration, if any, wins over the X-Tenant header.
+local function apply_integration_policy(msg, name, integ)
+  local from = msg:from_header()
+  if not from then
+    kumo.reject(550, '5.7.1 a From header is required')
+  end
+  local domain = string.lower(from.domain)
+  local entry = (policy_data('dkim_data.toml').domain or {})[domain]
+  if not entry then
+    kumo.reject(550, string.format('5.7.1 %s is not a sending domain of this server', domain))
+  end
+  if entry.owner and entry.owner ~= '' and entry.owner ~= name then
+    kumo.reject(550, string.format('5.7.1 %s belongs to another integration', domain))
+  end
+  local platform = policy_data('platform.toml')
+  if platform.require_verified_domains ~= false and not entry.verified then
+    kumo.reject(550, string.format('5.7.1 sending domain %s is not verified', domain))
+  end
+  local tenant = integ.tenant
+  if (not tenant or tenant == '') and entry.tenant and entry.tenant ~= '' then
+    tenant = entry.tenant
+  end
+  if tenant and tenant ~= '' then
+    msg:set_meta('tenant', tenant)
+  end
+end
+
+-- X-Tenant and X-Campaign headers select the tenant and campaign of the
+-- message (KumoMTA queue name campaign:tenant@domain), and are removed.
+-- X-Message-Ref is kept and logged (meta x_message_ref) for correlation.
+local function import_tenant_campaign(msg)
+  msg:import_x_headers { 'x-tenant', 'x-campaign', 'x-message-ref' }
+  local tenant = msg:get_meta 'x_tenant'
+  local campaign = msg:get_meta 'x_campaign'
+  if tenant and tenant ~= '' then
+    msg:set_meta('tenant', tenant)
+  end
+  if campaign and campaign ~= '' then
+    msg:set_meta('campaign', campaign)
+  end
+  msg:remove_x_headers { 'x-tenant', 'x-campaign' }
+end
+
 local get_inbound_domain = listener_domains:setup { POLICY .. '/listener_domains.toml' }
 sources:setup { POLICY .. '/sources.toml' }
 
@@ -95,6 +167,7 @@ if INIT.webhook then
     name = 'ns8_webhook',
     log_parameters = {
       headers = { 'Subject', 'Message-ID' },
+      meta = { 'tenant', 'campaign', 'extra', 'x_message_ref' },
     },
     filter = function(msg, hook_name)
       local record = msg:get_meta 'log_record'
@@ -113,9 +186,16 @@ if INIT.webhook then
           :post(cfg.url)
           :header('Content-Type', 'application/json')
           :body(message:get_data())
+        local body = message:get_data()
         if cfg.token then
           local token = kumo.secrets.load(KEYS.webhook_token)
           request = request:header('Authorization', 'Bearer ' .. token)
+        end
+        if cfg.signing then
+          -- HMAC-SHA256 of "<timestamp>.<body>", see docs/webhooks.md
+          local ts = tostring(os.time())
+          local mac = kumo.digest.hmac_sha256(KEYS.webhook_signing_secret, ts .. '.' .. body)
+          request = request:header('X-KumoMTA-Signature', string.format('t=%s,v1=%s', ts, mac.hex))
         end
         local response = request:send()
         local disposition = string.format(
@@ -148,6 +228,12 @@ kumo.on('init', function()
   kumo.configure_local_logs {
     log_dir = '/var/log/kumomta',
     max_segment_duration = '1 minute',
+    meta = { 'tenant', 'campaign', 'extra', 'x_message_ref' },
+  }
+
+  -- bounce_classification of the Bounce, TransientFailure and OOB records
+  kumo.configure_bounce_classifier {
+    files = { '/opt/kumomta/share/bounce_classifier/iana.toml' },
   }
 
   -- The admin API listens on the loopback only and every request needs
@@ -207,7 +293,8 @@ kumo.on('http_server_validate_auth_basic', function(user, password)
     local ok, expected = pcall(kumo.secrets.load, KEYS.metrics_password)
     return ok and expected ~= '' and password == expected
   end
-  return false
+  -- Integration credentials: acl.toml grants them /api/inject only
+  return check_password(integration_allows(user, 'inject'), password)
 end)
 
 -- SMTP AUTH PLAIN (only after STARTTLS): salted SHA-256 hashes
@@ -215,20 +302,39 @@ kumo.on('smtp_server_auth_plain', function(authz, authc, password, conn_meta)
   if password == '' then
     return false
   end
-  local users = load_toml(SECRETS .. '/smtp_users.toml').user or {}
-  local entry = users[authc]
-  if not entry then
-    return false
-  end
   if authz ~= authc then
     return false
   end
-  return kumo.digest.sha256(entry.salt .. password).hex == entry.sha256
+  local users = load_toml(SECRETS .. '/smtp_users.toml').user or {}
+  local entry = users[authc]
+  if entry then
+    return check_password(entry, password)
+  end
+  -- Integration credentials with the smtp scope
+  return check_password(integration_allows(authc, 'smtp'), password)
 end)
 
 -- Relaying: authenticated clients and trusted networks relay anywhere;
 -- anyone else can only send to the inbound domains
 kumo.on('get_listener_domain', function(domain, listener, conn_meta)
+  -- Return path and feedback domains: bounces (OOB) and ARF reports are
+  -- logged as OOB and Feedback records, never relayed
+  local platform = policy_data('platform.toml')
+  local lower = string.lower(domain)
+  if platform.bounce_domain and platform.bounce_domain ~= '' then
+    local is_bounce = (lower == string.lower(platform.bounce_domain))
+    for _, d in ipairs(platform.return_path_domains or {}) do
+      if lower == d then
+        is_bounce = true
+      end
+    end
+    if is_bounce then
+      return kumo.make_listener_domain {
+        log_oob = true,
+        log_arf = true,
+      }
+    end
+  end
   if is_trusted(conn_meta) then
     return kumo.make_listener_domain {
       relay_to = true,
@@ -284,15 +390,71 @@ end
 
 kumo.on('smtp_server_message_received', function(msg)
   if is_trusted(msg) then
+    import_tenant_campaign(msg)
+    local authz = msg:get_meta 'authz_id'
+    local users = load_toml(SECRETS .. '/smtp_users.toml').user or {}
+    if authz and not users[authz] then
+      local integ = integration_allows(authz, 'smtp')
+      if integ then
+        apply_integration_policy(msg, authz, integ)
+      end
+    end
     dkim_sign(msg)
   end
 end)
 
 kumo.on('http_message_generated', function(msg)
+  import_tenant_campaign(msg)
+  local user = msg:get_meta 'http_auth'
+  if user and user ~= 'ns8-admin' then
+    local integ = integration_allows(user, 'inject')
+    if not integ then
+      kumo.reject(550, '5.7.1 not authorized to inject')
+    end
+    apply_integration_policy(msg, user, integ)
+  end
   dkim_sign(msg)
 end)
 
--- Scheduled queues: retention, inbound routes, smarthost
+-- Per-tenant sending rate of the integrations (max_message_rate): the
+-- messages wait in their scheduled queue instead of being rejected
+kumo.on('throttle_insert_ready_queue', function(msg)
+  local tenant = msg:get_meta 'tenant'
+  if not tenant or tenant == '' then
+    return
+  end
+  for name, integ in pairs(integrations()) do
+    if integ.tenant == tenant and integ.max_message_rate and integ.max_message_rate ~= '' then
+      kumo
+        .make_throttle('ns8-tenant-' .. tenant, integ.max_message_rate)
+        :delay_message_if_throttled(msg)
+      return
+    end
+  end
+end)
+
+-- Sink mode (testing): the ns8_sink "connection" accepts and discards
+-- every message instead of delivering it, and logs a Delivery record, like
+-- the KumoMTA smart-sink example. A recipient local part containing
+-- "tempfail" or "permfail" simulates a transient failure or a bounce.
+kumo.on('ns8_sink', function(domain, tenant, campaign)
+  local connection = {}
+  function connection:send(message)
+    local user = string.lower(message:recipient().user or '')
+    if string.find(user, 'tempfail', 1, true) then
+      kumo.reject(451, '4.3.0 ns8-kumomta sink: simulated transient failure')
+    end
+    if string.find(user, 'permfail', 1, true) then
+      kumo.reject(550, '5.1.1 ns8-kumomta sink: simulated bounce')
+    end
+    return 'ns8-kumomta sink: accepted and discarded, not delivered'
+  end
+  return connection
+end)
+
+-- Scheduled queues: retention, inbound routes, smarthost. The queue
+-- configuration follows the configuration epoch, so a change applies to
+-- the existing queues at once.
 kumo.on('get_queue_config', function(domain, tenant, campaign, routing_domain)
   local q = policy_data('queues.toml')
   local default = q.default or {}
@@ -300,7 +462,12 @@ kumo.on('get_queue_config', function(domain, tenant, campaign, routing_domain)
     egress_pool = default.egress_pool or 'default',
     retry_interval = default.retry_interval,
     max_age = default.max_age,
+    refresh_strategy = 'Epoch',
   }
+  if (q.sink or {}).enabled then
+    params.protocol = { custom_lua = { constructor = 'ns8_sink' } }
+    return kumo.make_queue_config(params)
+  end
   local route = (q.route or {})[domain]
   local smarthost = q.smarthost or {}
   if route then

@@ -11,7 +11,8 @@
     "copy_to_clipboard": "Copy to clipboard",
     "copied": "Copied",
     "show_more": "Show more",
-    "show_less": "Show less"
+    "show_less": "Show less",
+    "cancel": "Cancel"
   },
   "status": {
     "title": "Status",
@@ -52,8 +53,8 @@
     "relay": "Relaying",
     "relay_networks": "Trusted networks",
     "relay_networks_helper": "IP addresses or CIDR networks, one per line: their clients relay without authentication. Loopback is always trusted",
-    "cluster_relay": "Offer as smarthost to the cluster",
-    "cluster_relay_tooltip": "Trust the cluster network and publish the submission service, so that the cluster Email notifications settings and other applications can use this MTA as their relay",
+    "cluster_relay": "Offer as smarthost to the cluster (cluster relay)",
+    "cluster_relay_tooltip": "On by default. Trusts the cluster network for relaying without authentication and publishes the submission service, so that the cluster Email notifications settings and other applications can use this MTA as their relay. Turn it off to stop trusting the cluster network and withdraw the service",
     "cluster_relay_needs_port_25": "The cluster smarthost needs the inbound listener on port 25",
     "cluster_relay_needs_port_25_description": "NethServer configures an application smarthost with port 25 and no authentication: the service is not published while the inbound listener is disabled or on another port",
     "cluster_relay_active": "Published as cluster smarthost",
@@ -69,7 +70,16 @@
     "metrics_allowlist": "Allowed networks",
     "metrics_allowlist_helper": "Optional. One IP address or CIDR network per line",
     "mail_modules_on_node": "Other mail modules on this node",
-    "mail_modules_on_node_description": "{modules}: their mail ports cannot be used. Disable the inbound listener and choose another submission port to run as an outbound relay next to them"
+    "mail_modules_on_node_description": "{modules}: their mail ports cannot be used. Disable the inbound listener and choose another submission port to run as an outbound relay next to them",
+    "cluster_relay_off": "Cluster relay is off",
+    "cluster_relay_off_description": "The cluster network is not trusted and the submission service is not published: the cluster Email notifications settings no longer list this MTA. Applications must authenticate with an SMTP user or come from a trusted network",
+    "implicit_tls": "Implicit TLS listener (SMTPS, port 465)",
+    "implicit_tls_tooltip": "Not available yet: KumoMTA added implicit TLS listeners (tls_mode = ImplicitTls) in October 2026, after its newest stable release 2026.09.29. It will be offered once a stable KumoMTA release includes it. Use the submission listener with STARTTLS meanwhile",
+    "implicit_tls_unavailable": "Needs a newer KumoMTA release",
+    "testing": "Testing",
+    "sink_enabled": "Sink mode (testing)",
+    "sink_tooltip": "KumoMTA accepts every message and discards it instead of delivering it, and logs a Delivery record. Recipients whose local part contains tempfail or permfail simulate a deferral or a bounce. Never use it in production",
+    "sink_description": "While sink mode is on, no message leaves this server: outbound mail, relayed inbound mail and the queued messages are accepted and discarded"
   },
   "about": {
     "title": "About"
@@ -89,7 +99,13 @@
     "get-queue-status": "Get queue status",
     "list-recent-events": "List recent events",
     "generate-dkim-key": "Generate DKIM key",
-    "list-openbao-servers": "List OpenBao servers"
+    "list-openbao-servers": "List OpenBao servers",
+    "copy-openbao-to-local": "Copy OpenBao secrets to local storage",
+    "list-openbao-only-secrets": "List the secrets stored only in OpenBao",
+    "add-domain": "Add sending domain",
+    "remove-domain": "Remove sending domain",
+    "validate-domain": "Check DNS of sending domain",
+    "list-domains": "List sending domains"
   },
   "error": {
     "error": "Error",
@@ -138,7 +154,26 @@
     "route_host": "Destination server",
     "route_port": "Port",
     "add_route": "Add route",
-    "saving": "Saving domains"
+    "saving": "Saving domains",
+    "status_pending": "DNS pending",
+    "status_verified": "Verified",
+    "status_failed": "DNS check failed",
+    "owner": "Integration: {owner}",
+    "tenant": "Tenant: {tenant}",
+    "last_checked": "Last checked {time}",
+    "never_checked": "Never checked",
+    "dns_records": "DNS records to publish",
+    "validate": "Check DNS",
+    "check_dkim": "DKIM",
+    "check_spf": "SPF",
+    "check_dmarc": "DMARC",
+    "check_return_path": "Return path",
+    "recommended": "recommended",
+    "check_status_pass": "ok",
+    "check_status_fail": "wrong",
+    "check_status_missing": "not found",
+    "check_status_unchecked": "not checked",
+    "remove_api_confirm": "Remove {domain}, added by the integration {owner}? Its DKIM key is deleted"
   },
   "delivery": {
     "title": "Delivery",
@@ -171,7 +206,10 @@
     "webhook_token_helper": "Optional: sent as Authorization: Bearer",
     "webhook_token_clear": "Remove the bearer token",
     "webhook_record_types": "Record types",
-    "saving": "Saving delivery settings"
+    "saving": "Saving delivery settings",
+    "webhook_signing_secret": "Signing secret",
+    "webhook_signing_secret_helper": "Optional, at least 16 characters: each request carries X-KumoMTA-Signature, an HMAC-SHA256 of the timestamp and the body. See docs/webhooks.md",
+    "webhook_signing_secret_clear": "Remove the signing secret"
   },
   "openbao": {
     "title": "OpenBao",
@@ -188,7 +226,22 @@
     "path_helper": "Secrets are stored under {path}/dkim, {path}/smarthost and {path}/webhook",
     "key": "Field name",
     "key_helper": "Field of each secret, empty for the default 'key'",
-    "saving": "Saving OpenBao settings"
+    "saving": "Saving OpenBao settings",
+    "disable_title": "Turn off OpenBao",
+    "disable_warning_title": "These secrets exist only in OpenBao",
+    "disable_warning_description": "Without OpenBao, KumoMTA cannot read them: the DKIM keys stop signing (messages leave unsigned) and the smarthost password and webhook token stop working until they are set again",
+    "item_dkim_key": "DKIM private key",
+    "item_smarthost_password": "Smarthost password",
+    "item_webhook_token": "Webhook token",
+    "not_readable": "Not readable with the current token",
+    "copy_description": "Copy them to the local storage first: they are written to files readable only by the module, then OpenBao is turned off.",
+    "copy_impossible": "The current token cannot read every secret",
+    "copy_impossible_description": "Copying to the local storage is not possible. Turn OpenBao off anyway, or cancel and fix the token first",
+    "copy_and_disable": "Copy to local storage and turn off",
+    "disable_anyway": "Turn off anyway",
+    "items_unavailable_title": "Some secrets were left in OpenBao",
+    "items_unavailable_description": "No longer available to KumoMTA: {items}. Generate or set them again",
+    "item_webhook_signing_secret": "Webhook signing secret"
   },
   "queue": {
     "title": "Queue",
@@ -244,6 +297,57 @@
     "token_required": "Token required",
     "domain_already_used_in_traefik": "Host name already used in Traefik",
     "openbao_write_failed": "Cannot write the secret to OpenBao",
-    "domain_not_found": "Domain not found"
+    "domain_not_found": "Domain not found",
+    "openbao_not_enabled": "OpenBao is not enabled",
+    "invalid_integration_name": "Invalid name: 3-32 lowercase letters, digits and dashes, not ns8-admin or metrics",
+    "duplicate_integration": "Duplicate integration",
+    "name_used_by_smtp_user": "An SMTP user has the same name",
+    "integration_password_too_short": "At least 16 characters",
+    "scope_required": "Choose at least one scope",
+    "invalid_tenant": "Invalid tenant",
+    "api_port_missing": "The module has no second TCP port: update it",
+    "invalid_spf_mechanism": "Invalid SPF mechanism",
+    "domain_exists": "The domain already exists",
+    "integration_not_found": "No such integration",
+    "invalid_selector": "Invalid selector",
+    "invalid_private_key": "Not a PEM private key"
+  },
+  "warnings": {
+    "sink_mode_title": "Sink mode is on: no mail is delivered",
+    "sink_mode_description": "KumoMTA accepts and discards every outbound message (testing mode). Turn it off in Settings to deliver mail again"
+  },
+  "integrations": {
+    "title": "Integrations",
+    "api": "HTTPS API for sending platforms",
+    "api_description": "Sending platforms inject mail over HTTP (KumoMTA /api/inject/v1) and manage their sending domains (/api/v1/domains) with an integration credential, through Traefik and HTTPS. The admin API of the module is never exposed. SMTP submission with the credential works too.",
+    "api_host": "API host name",
+    "api_host_helper": "Empty disables the HTTPS routes. The DNS name must point to this node; Let's Encrypt follows the Settings page",
+    "api_allowlist": "Allowed networks",
+    "api_allowlist_helper": "Optional. One IP address or CIDR network per line",
+    "endpoints": "Endpoints",
+    "domain_policy": "Sending domains",
+    "require_verified_domains": "Integrations send only from verified domains",
+    "require_verified_domains_tooltip": "An integration can send only From a sending domain it added, or one of the administrator, whose DNS records are validated. Turn it off for tests only",
+    "spf_include": "SPF mechanism",
+    "spf_include_helper": "Mechanism the customers add to their SPF record, e.g. include:_spf.example.org. Empty for a:<host name>",
+    "bounce_domain": "Return path and feedback domain",
+    "bounce_domain_helper": "Optional. Its MX must point to this server: bounces and feedback-loop reports sent to it, or to bounces.<customer domain> (CNAME to it), are logged as OOB and Feedback records and sent to the webhook",
+    "credentials": "Integration credentials",
+    "credentials_description": "One credential per sending platform, separate from the admin API user of the module. HTTP basic authentication for the API, SMTP AUTH for submission.",
+    "no_integrations": "No integrations",
+    "name": "Name (user name)",
+    "tenant": "Tenant",
+    "tenant_helper": "Optional: forced on its messages. Empty lets X-Tenant choose",
+    "max_message_rate": "Rate of the tenant",
+    "scope_inject": "HTTP injection",
+    "scope_smtp": "SMTP submission",
+    "scope_domains": "Domain management API",
+    "password": "Password",
+    "password_helper": "Write only, at least 16 characters. The module stores a salted hash",
+    "generate_password": "Generate",
+    "copy_password_now": "Copy the password now",
+    "copy_password_now_description": "It is shown only here, before saving: the module keeps only a hash",
+    "add_integration": "Add integration",
+    "saving": "Saving integrations"
   }
 }

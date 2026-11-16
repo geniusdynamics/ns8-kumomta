@@ -117,6 +117,76 @@
                                 "type": "string"
                             }
                         }
+                    },
+                    "owner": {
+                        "type": "string",
+                        "description": "Integration that added the domain through the API, empty for the administrator"
+                    },
+                    "tenant": {
+                        "type": "string"
+                    },
+                    "status": {
+                        "type": "string",
+                        "enum": [
+                            "pending",
+                            "verified",
+                            "failed"
+                        ]
+                    },
+                    "last_checked": {
+                        "type": "string",
+                        "description": "ISO 8601 UTC time of the last DNS check, empty if never checked"
+                    },
+                    "checks": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": {
+                                    "type": "string"
+                                },
+                                "required": {
+                                    "type": "boolean"
+                                },
+                                "status": {
+                                    "type": "string",
+                                    "enum": [
+                                        "pass",
+                                        "fail",
+                                        "missing"
+                                    ]
+                                },
+                                "detail": {
+                                    "type": "string"
+                                }
+                            }
+                        }
+                    },
+                    "records": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "check": {
+                                    "type": "string"
+                                },
+                                "required": {
+                                    "type": "boolean"
+                                },
+                                "type": {
+                                    "type": "string"
+                                },
+                                "name": {
+                                    "type": "string"
+                                },
+                                "value": {
+                                    "type": "string"
+                                },
+                                "purpose": {
+                                    "type": "string"
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -302,6 +372,94 @@
         },
         "api_port": {
             "type": "integer"
+        },
+        "sink_enabled": {
+            "type": "boolean"
+        },
+        "warnings": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": [
+                    "id",
+                    "message"
+                ],
+                "properties": {
+                    "id": {
+                        "type": "string"
+                    },
+                    "message": {
+                        "type": "string"
+                    }
+                }
+            }
+        },
+        "integrations": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": [
+                    "name",
+                    "scopes",
+                    "password_set"
+                ],
+                "properties": {
+                    "name": {
+                        "type": "string"
+                    },
+                    "tenant": {
+                        "type": "string"
+                    },
+                    "scopes": {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        }
+                    },
+                    "max_message_rate": {
+                        "type": "string"
+                    },
+                    "password_set": {
+                        "type": "boolean"
+                    }
+                },
+                "additionalProperties": false
+            }
+        },
+        "api_host": {
+            "type": "string"
+        },
+        "api_allowlist": {
+            "type": "array",
+            "items": {
+                "type": "string"
+            }
+        },
+        "require_verified_domains": {
+            "type": "boolean"
+        },
+        "spf_include": {
+            "type": "string"
+        },
+        "bounce_domain": {
+            "type": "string"
+        },
+        "webhook_signing_secret_set": {
+            "type": "boolean"
+        },
+        "spf_mechanism": {
+            "type": "string"
+        },
+        "api_endpoints": {
+            "type": "object",
+            "properties": {
+                "inject": {
+                    "type": "string"
+                },
+                "domains": {
+                    "type": "string"
+                }
+            }
         }
     },
     "additionalProperties": false

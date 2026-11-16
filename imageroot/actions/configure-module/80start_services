@@ -1,17 +1,25 @@
 #!/bin/bash
 
 #
-# Copyright (C) 2023 Nethesis S.r.l.
+# Copyright (C) 2026 Genius Dynamics
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
+
 set -e
 
 # Redirect any output to the journal (stderr)
 exec 1>&2
 
-# If the control reaches this step, the service can be enabled and started
+systemctl --user enable kumomta.service kumomta-logs-cleanup.timer
+systemctl --user start kumomta-logs-cleanup.timer
 
-touch smarthost.env
-
-systemctl --user enable kickstart.service
-systemctl --user restart kickstart.service
+if [[ -f .restart-required ]] || ! systemctl --user -q is-active kumomta.service; then
+    # Listeners, HTTP API or environment changed: restart kumod. The unit
+    # reports started only once the API answers (ExecStartPost)
+    systemctl --user restart kumomta.service
+    rm -f .restart-required .reload-required
+elif [[ -f .reload-required ]]; then
+    # Everything else: a configuration epoch bump, the connections stay up
+    runagent kumomta-reload
+    rm -f .reload-required
+fi

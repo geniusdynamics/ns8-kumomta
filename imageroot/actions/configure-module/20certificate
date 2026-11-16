@@ -1,0 +1,54 @@
+#!/usr/bin/env python3
+
+#
+# Copyright (C) 2026 Genius Dynamics
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+
+# TLS certificate of the SMTP listeners (state/tls, mounted on
+# /opt/kumomta/etc/tls), like ns8-mail: the Traefik certificate of the host
+# name. Until Traefik has one, get-certificate writes a self-signed
+# certificate; the certificate-changed event replaces it.
+
+import os
+import sys
+import agent
+import agent.tasks
+import kumomta_ns8 as kumo
+
+settings = kumo.load_settings()
+hostname = settings["hostname"]
+
+if settings["lets_encrypt"]:
+    # Like ns8-mail: request the certificate in the background, the DNS
+    # record may not point to this node yet. certificate-changed follows.
+    traefik_id = agent.resolve_agent_id('traefik@node')
+    if traefik_id:
+        agent.tasks.run_nowait(
+            agent_id=traefik_id,
+            action='set-certificate',
+            data={"fqdn": hostname},
+            parent='',
+            extra={'title': 'set-certificate', 'isNotificationHidden': False},
+        )
+
+os.makedirs(kumo.TLS_DIR, mode=0o700, exist_ok=True)
+previous = ""
+if os.path.exists(".tls-hostname"):
+    with open(".tls-hostname") as fp:
+        previous = fp.read().strip()
+if previous != hostname:
+    # Another host name: drop the old certificate
+    for name in ("cert.pem", "key.pem"):
+        try:
+            os.unlink(os.path.join(kumo.TLS_DIR, name))
+        except FileNotFoundError:
+            pass
+proc = agent.run_helper('get-certificate', f'--cert-file={kumo.TLS_DIR}/cert.pem',
+                        f'--key-file={kumo.TLS_DIR}/key.pem', hostname)
+# 0: new certificate, 3: unchanged, 1: Traefik has none (yet) and the
+# current files are kept
+agent.assert_exp(os.path.exists(f"{kumo.TLS_DIR}/cert.pem") and os.path.exists(f"{kumo.TLS_DIR}/key.pem"),
+                 "no TLS certificate")
+os.chmod(f"{kumo.TLS_DIR}/key.pem", 0o600)
+kumo.write_file(".tls-hostname", hostname + "\n")

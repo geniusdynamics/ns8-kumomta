@@ -1,0 +1,14 @@
+{
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "Generate a DKIM key",
+    "$id": "http://nethserver.org/json-schema/task/input/kumomta/generate-dkim-key",
+    "description": "Generate the DKIM key of a sending domain, or move the local key to OpenBao when it is enabled",
+    "examples": [{"domain": "example.org"}, {"domain": "example.org", "rotate": true}],
+    "type": "object",
+    "required": ["domain"],
+    "properties": {
+        "domain": {"type": "string", "minLength": 3, "maxLength": 253},
+        "rotate": {"type": "boolean", "description": "Replace the current key with a new one"}
+    },
+    "additionalProperties": false
+}

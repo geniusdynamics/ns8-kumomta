@@ -1,0 +1,19 @@
+#!/usr/bin/env python3
+
+#
+# Copyright (C) 2026 Genius Dynamics
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+
+# Render the KumoMTA policy (state/kumomta): init.lua and its TOML data
+# files. Settings of the init event need a restart of kumod, everything
+# else is applied live by 80start_services with a configuration epoch bump.
+
+import kumomta_ns8 as kumo
+
+settings = kumo.load_settings()
+changed, restart = kumo.write_config(settings)
+if restart:
+    open(".restart-required", "w").close()
+elif changed:
+    open(".reload-required", "w").close()

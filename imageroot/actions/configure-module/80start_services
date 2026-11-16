@@ -10,8 +10,11 @@ set -e
 # Redirect any output to the journal (stderr)
 exec 1>&2
 
-systemctl --user enable kumomta.service kumomta-logs-cleanup.timer
+systemctl --user enable kumomta.service kumomta-api.service kumomta-logs-cleanup.timer
 systemctl --user start kumomta-logs-cleanup.timer
+# Domain management API of the integrations (loopback, behind Traefik): it
+# reads the settings at each request, a restart is never needed here
+systemctl --user start kumomta-api.service
 
 if [[ -f .restart-required ]] || ! systemctl --user -q is-active kumomta.service; then
     # Listeners, HTTP API or environment changed: restart kumod. The unit

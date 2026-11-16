@@ -15,7 +15,13 @@ its administration interface.
   server
 - optional upstream smarthost with authentication
 - traffic shaping per destination, over the KumoMTA default rules
-- optional webhook of the delivery log records
+- optional webhook of the delivery log records, with an HMAC-SHA256
+  signature
+- **sending platforms**: integration credentials separate from the admin
+  user, HTTPS injection API (`/api/inject/v1`) and domain management API
+  (`/api/v1/domains`) through Traefik, customer domains with DKIM keys,
+  DNS records and validation, tenants and campaigns, bounce
+  classification, return path and feedback-loop domain
 - optional **OpenBao / Vault** key sources for the secrets, with a copy
   back to local storage before turning it off
 - optional **sink mode** for testing: accept and discard all outbound mail
@@ -25,6 +31,13 @@ its administration interface.
 
 ## Documentation
 
+- [docs/integration.md](docs/integration.md): integrating a sending
+  platform: SMTP or HTTP injection, credentials, tenants and campaigns
+- [docs/domains-and-dkim.md](docs/domains-and-dkim.md): sending domains,
+  DKIM, DNS records, validation and status
+- [docs/webhooks.md](docs/webhooks.md): event types, payload, signature
+- [docs/api.md](docs/api.md): reference of the HTTPS API and the actions,
+  with curl examples
 - [docs/sink-mode.md](docs/sink-mode.md): sink mode for testing
 - [docs/openbao.md](docs/openbao.md): OpenBao/Vault secrets, turning OpenBao off
 
@@ -64,9 +77,14 @@ EOF
 
 See `imageroot/actions/configure-module/validate-input.json` for every
 field. Secrets (`smtp_users[].password`, `smarthost_password`,
-`webhook_token`, `vault_token`, `metrics_password`) are write only:
+`webhook_token`, `webhook_signing_secret`, `vault_token`,
+`metrics_password`, `integrations[].password`) are write only:
 `get-configuration` returns `*_set` markers instead, and SMTP user
 passwords are kept as salted SHA-256 hashes.
+
+Integration settings: `integrations`, `api_host`, `api_allowlist`,
+`require_verified_domains`, `spf_include`, `bounce_domain`,
+`webhook_signing_secret` (see [docs/api.md](docs/api.md)).
 
 Other actions:
 
@@ -77,6 +95,10 @@ Other actions:
 | `list-recent-events` | reader | recent bounces, deferrals, expirations and deliveries from the logs |
 | `list-openbao-servers` | reader | OpenBao instances published in the cluster |
 | `generate-dkim-key` | admin | generate or rotate a DKIM key, or move a local key to OpenBao |
+| `list-domains` | reader | sending domains, owner, DNS status, records to publish |
+| `add-domain` | admin | add a sending domain (optionally owned by an integration), generate or import its DKIM key |
+| `validate-domain` | admin | check the DNS of one or all sending domains: pending, verified, failed |
+| `remove-domain` | admin | remove a sending domain and its local key |
 | `list-openbao-only-secrets` | reader | secrets that exist only in OpenBao, and whether the token reads them (no values) |
 | `copy-openbao-to-local` | admin | copy those secrets to local 0600 files before turning OpenBao off |
 
@@ -125,6 +147,37 @@ shows the 465 listener as a disabled option until a stable release brings
 listener in `INIT.listeners` with `tls_mode`, its firewall port and the
 same port conflict check as 25 and 587.
 
+### Sending platforms
+
+An integration credential (Integrations page, `integrations` of
+`configure-module`) is a user name and a password with scopes: `inject`
+(HTTP injection), `smtp` (SMTP AUTH) and `domains` (domain API), an
+optional tenant and sending rate. Its salted SHA-256 hash is in
+`state/secrets/integrations.*` (0600); kumod checks it in
+`http_server_validate_auth_basic` and `smtp_server_auth_plain`, and the
+rendered `acl.toml` grants it `/api/inject` only. The `ns8-admin` user of
+the module stays on the loopback.
+
+With `api_host`, `configure-module` publishes two Traefik routes on that
+host name, HTTPS only: `/api/inject` to kumod and `/api/v1` to
+`kumomta-api.service`, a small Python daemon on the second TCP port of the
+module (127.0.0.1) that serves the domain API with the same credentials.
+The daemon, the domain actions and `configure-module` share the settings
+under a file lock; a change re-renders the policy and bumps the
+configuration epoch.
+
+Messages of an integration must come `From:` a sending domain of the MTA,
+owned by it or by the administrator, and verified (DKIM and SPF found in
+the DNS) while `require_verified_domains` is on. `X-Tenant` and
+`X-Campaign` set the KumoMTA tenant and campaign (per-customer queues), a
+tenant bound to the credential wins, and `max_message_rate` throttles the
+tenant. The log records and the webhook carry `meta.tenant`,
+`meta.campaign` and the per-recipient injection `metadata` (`meta.extra`),
+with the IANA `bounce_classification`. With `bounce_domain`, the inbound
+listener accepts mail for it and for `bounces.<sending domain>` and logs
+DSNs and ARF reports as `OOB` and `Feedback` records instead of relaying
+them. See [docs/integration.md](docs/integration.md).
+
 ### Configuration and reload
 
 `configure-module` stores the settings in `state/settings.json` (no
@@ -141,7 +194,8 @@ secrets) and renders the KumoMTA policy in `state/kumomta`, mounted on
 | `dkim_data.toml` | DKIM signing data, format of `policy-extras.dkim_sign` (plus `vault_key`) |
 | `queues.toml` | retention, inbound routes, smarthost |
 | `shaping.toml` | per-destination limits, merged over the KumoMTA `shaping.toml` |
-| `webhook.toml` | webhook URL |
+| `webhook.toml` | webhook URL, token and signature flags |
+| `platform.toml` | domain policy of the integrations, bounce and feedback domains |
 
 The data files are read through `kumo.memoize` with
 `invalidate_with_epoch`. After a change the module bumps the KumoMTA
@@ -235,7 +289,8 @@ kept 7 days (`kumomta-logs-cleanup.timer`).
 ### Backup
 
 `state-include.conf` covers `settings.json`, `secrets/`, `openbao.env`,
-`dkim/`, the rendered policy and the `kumomta-spool` volume. Before the
+`dkim/` (the integration credentials are under `secrets/`), the rendered
+policy and the `kumomta-spool` volume. Before the
 backup `module-dump-state` asks kumod to flush its RocksDB spool. Restore
 and clone call `configure-module` with every setting and `lets_encrypt`
 off.

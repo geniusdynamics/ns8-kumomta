@@ -1,0 +1,25 @@
+#
+# Copyright (C) 2026 Genius Dynamics
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+
+#
+# Sending domain management API of the integrations (kumomta-api), on
+# 127.0.0.1, second TCP port of the module. Traefik routes /api/v1 of the
+# API host name here. It authenticates the integration credentials itself.
+#
+
+[Unit]
+Description=KumoMTA domain management API for sending platforms
+After=kumomta.service
+
+[Service]
+EnvironmentFile=%S/state/environment
+WorkingDirectory=%S/state
+ExecStart=runagent kumomta-api
+Restart=always
+RestartSec=5
+SyslogIdentifier=%N
+
+[Install]
+WantedBy=default.target

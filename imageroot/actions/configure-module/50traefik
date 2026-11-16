@@ -9,6 +9,10 @@
 # /metrics path of the metrics host name. kumod itself requires the HTTP
 # basic credentials of the "metrics" user (acl.toml grants it /metrics and
 # /metrics.json only); the admin API is never routed.
+#
+# Optional API host name of the sending platforms: /api/inject goes to
+# kumod (integration credentials, acl.toml grants them /api/inject only),
+# /api/v1 to the domain management daemon (kumomta-api.service).
 
 import os
 import sys
@@ -37,3 +41,37 @@ else:
     if traefik_id:
         agent.tasks.run(agent_id=traefik_id, action='delete-route',
                         data={'instance': route_id}, extra={'isNotificationHidden': True})
+
+
+def delete_route(instance):
+    traefik_id = agent.resolve_agent_id('traefik@node')
+    if traefik_id:
+        agent.tasks.run(agent_id=traefik_id, action='delete-route',
+                        data={'instance': instance}, extra={'isNotificationHidden': True})
+
+
+api_routes = {
+    os.environ['MODULE_ID'] + '-api-inject': ('/api/inject', os.environ['TCP_PORT']),
+    os.environ['MODULE_ID'] + '-api': ('/api/v1', kumo.daemon_port()),
+}
+# .api-routes: the routes exist, delete them when the host name goes away
+had_routes = os.path.exists(".api-routes")
+for instance, (path, port) in api_routes.items():
+    if settings["api_host"] and port:
+        route = {
+            'instance': instance,
+            'url': f'http://127.0.0.1:{port}',
+            'host': settings["api_host"],
+            'path': path,
+            'strip_prefix': False,
+            'http2https': True,
+            'lets_encrypt': settings["lets_encrypt"],
+        }
+        if settings["api_allowlist"]:
+            route['ip_allowlist'] = settings["api_allowlist"]
+        agent.set_route(route)
+        open(".api-routes", "w").close()
+    elif had_routes:
+        delete_route(instance)
+if not settings["api_host"] and had_routes:
+    os.unlink(".api-routes")

@@ -57,6 +57,13 @@
         <span>{{ $t("delivery.title") }}</span>
       </cv-side-nav-link>
       <cv-side-nav-link
+        @click="goToAppPage(instanceName, 'integrations')"
+        :class="{ 'current-page': isLinkActive('integrations') }"
+      >
+        <template v-slot:nav-icon><Api20 /></template>
+        <span>{{ $t("integrations.title") }}</span>
+      </cv-side-nav-link>
+      <cv-side-nav-link
         @click="goToAppPage(instanceName, 'openbao')"
         :class="{ 'current-page': isLinkActive('openbao') }"
       >
@@ -83,6 +90,7 @@ import UserMultiple20 from "@carbon/icons-vue/es/user--multiple/20";
 import Certificate20 from "@carbon/icons-vue/es/certificate/20";
 import DeliveryTruck20 from "@carbon/icons-vue/es/delivery-truck/20";
 import Locked20 from "@carbon/icons-vue/es/locked/20";
+import Api20 from "@carbon/icons-vue/es/api/20";
 import { mapState } from "vuex";
 import { QueryParamService, UtilService } from "@nethserver/ns8-ui-lib";
 
@@ -97,6 +105,7 @@ export default {
     Certificate20,
     DeliveryTruck20,
     Locked20,
+    Api20,
   },
   mixins: [QueryParamService, UtilService],
   data() {

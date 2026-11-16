@@ -117,11 +117,16 @@
                     "selector": {
                         "type": "string",
                         "pattern": "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$"
+                    },
+                    "tenant": {
+                        "type": "string",
+                        "maxLength": 64,
+                        "description": "KumoMTA tenant of the messages of this domain sent by integrations without a tenant of their own"
                     }
                 },
                 "additionalProperties": false
             },
-            "description": "Sending domains, signed with DKIM"
+            "description": "Sending domains of the administrator, signed with DKIM. The domains added by integrations through the API are not listed here and are kept"
         },
         "inbound_routes": {
             "type": "array",
@@ -304,6 +309,87 @@
         "sink_enabled": {
             "type": "boolean",
             "description": "Testing only: accept and discard every outbound message instead of delivering it (Delivery records are still logged)"
+        },
+        "webhook_signing_secret": {
+            "type": "string",
+            "maxLength": 4096,
+            "description": "Write only HMAC-SHA256 secret: the webhook requests carry X-KumoMTA-Signature. Empty keeps the current one"
+        },
+        "webhook_signing_secret_clear": {
+            "type": "boolean",
+            "description": "Remove the signing secret"
+        },
+        "integrations": {
+            "type": "array",
+            "description": "Integration credentials of sending platforms, distinct from the module's admin API user. Integrations not listed are removed",
+            "items": {
+                "type": "object",
+                "required": [
+                    "name"
+                ],
+                "properties": {
+                    "name": {
+                        "type": "string",
+                        "pattern": "^[a-z0-9][a-z0-9-]{2,31}$",
+                        "description": "User name of the credential (HTTP basic auth, SMTP AUTH)"
+                    },
+                    "password": {
+                        "type": "string",
+                        "maxLength": 256,
+                        "description": "Write only, at least 16 characters. Empty keeps the current one"
+                    },
+                    "tenant": {
+                        "type": "string",
+                        "maxLength": 64,
+                        "description": "KumoMTA tenant forced on the messages of this credential; empty lets the X-Tenant header choose"
+                    },
+                    "scopes": {
+                        "type": "array",
+                        "items": {
+                            "type": "string",
+                            "enum": [
+                                "inject",
+                                "smtp",
+                                "domains"
+                            ]
+                        },
+                        "description": "inject: HTTP injection API; smtp: SMTP AUTH; domains: sending domain management API"
+                    },
+                    "max_message_rate": {
+                        "type": "string",
+                        "maxLength": 32,
+                        "description": "Sending rate of the tenant, e.g. 1000/h; empty for no limit"
+                    }
+                },
+                "additionalProperties": false
+            }
+        },
+        "api_host": {
+            "type": "string",
+            "maxLength": 253,
+            "description": "Host name of the HTTPS API routes for the integrations (/api/inject/v1 and /api/v1), empty to disable"
+        },
+        "api_allowlist": {
+            "type": "array",
+            "items": {
+                "type": "string",
+                "maxLength": 64
+            },
+            "description": "Optional networks allowed to reach the API routes"
+        },
+        "require_verified_domains": {
+            "type": "boolean",
+            "description": "Integrations can send only from verified sending domains"
+        },
+        "spf_include": {
+            "type": "string",
+            "maxLength": 253,
+            "description": "SPF mechanism to publish and check, e.g. include:_spf.example.org; empty for a:<hostname>"
+        },
+        "bounce_domain": {
+            "type": "string",
+            "maxLength": 253,
+            "description": "Return path, bounce and feedback-loop domain handled by this MTA, empty to disable"
         }
     },
     "additionalProperties": false

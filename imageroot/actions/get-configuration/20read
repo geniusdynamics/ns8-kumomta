@@ -48,4 +48,11 @@ except Exception:
     config["mail_modules"] = []
 config["api_port"] = int(os.environ.get("TCP_PORT", 0))
 
+# Conditions the UI shows as a banner on every page
+warnings = []
+if settings["sink_enabled"]:
+    warnings.append({"id": "sink_mode_enabled",
+                     "message": "Sink mode is on: outbound mail is accepted and discarded, nothing is delivered"})
+config["warnings"] = warnings
+
 json.dump(config, fp=sys.stdout)

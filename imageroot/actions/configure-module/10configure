@@ -41,6 +41,22 @@ settings["vault_address"] = settings["vault_address"].rstrip("/")
 os.makedirs(kumo.SECRETS_DIR, mode=0o700, exist_ok=True)
 kumo.ensure_api_credentials()
 
+# Warnings returned by the action (99output) and logged
+warnings = []
+if current["vault_enabled"] and not settings["vault_enabled"]:
+    # Secrets that live only in OpenBao: without it KumoMTA cannot use
+    # them. copy-openbao-to-local copies them first, the UI offers it.
+    items = kumo.vault_only_items(current)
+    if items:
+        names = [item["name"] for item in items]
+        warnings.append({"id": "openbao_items_unavailable", "items": names})
+        print(agent.SD_WARNING + "OpenBao disabled: these secrets exist only in OpenBao and are no longer available: "
+              + ", ".join(names), file=sys.stderr)
+if settings["sink_enabled"]:
+    warnings.append({"id": "sink_mode_enabled", "items": []})
+    print(agent.SD_WARNING + "Sink mode is on: outbound mail is accepted and discarded, not delivered", file=sys.stderr)
+kumo.write_file(kumo.WARNINGS_FILE, json.dumps(warnings), 0o600)
+
 
 def validation_failed(field, code):
     agent.set_status('validation-failed')

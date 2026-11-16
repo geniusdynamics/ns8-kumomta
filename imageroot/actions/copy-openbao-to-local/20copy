@@ -1,0 +1,37 @@
+#!/usr/bin/env python3
+
+#
+# Copyright (C) 2026 Genius Dynamics
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+
+# Copy the secrets that exist only in OpenBao into local 0600 files, with
+# the current token, so that OpenBao can be turned off without losing
+# them. KumoMTA keeps reading OpenBao until it is turned off. The output
+# names the copied and failed items, never the values.
+
+import json
+import sys
+import agent
+import kumomta_ns8 as kumo
+
+settings = kumo.load_settings()
+if not settings["vault_enabled"]:
+    agent.set_status('validation-failed')
+    json.dump([{'field': 'vault_enabled', 'parameter': 'vault_enabled', 'value': False,
+                'error': 'openbao_not_enabled'}], fp=sys.stdout)
+    sys.exit(3)
+
+copied, failed = [], []
+for item in kumo.vault_only_items(settings):
+    try:
+        kumo.copy_vault_item_to_local(settings, item)
+        copied.append(item["name"])
+        print(f"Copied {item['name']} from OpenBao to the local storage", file=sys.stderr)
+    except (RuntimeError, OSError) as ex:
+        failed.append({"name": item["name"], "error": str(ex)})
+        print(agent.SD_ERR + f"Cannot copy {item['name']}: {ex}", file=sys.stderr)
+
+json.dump({"copied": copied, "failed": failed}, fp=sys.stdout)
+if failed:
+    sys.exit(1)

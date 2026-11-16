@@ -11,9 +11,14 @@ set -e
 # Prepare variables for later use
 images=()
 # The image will be pushed to GitHub container registry
-repobase="${REPOBASE:-ghcr.io/nethserver}"
+repobase="${REPOBASE:-ghcr.io/geniusdynamics}"
 # Configure the image name
-reponame="kickstart"
+reponame="kumomta"
+# KumoMTA publishes dated stable releases (YYYY.MM.DD-<commit>), the same
+# tags as its GitHub releases: no semver tag exists. renovate.json compares
+# them with a regex versioning (date part only)
+# renovate: datasource=docker packageName=ghcr.io/kumocorp/kumomta
+KUMOMTA_VERSION=2026.09.29-b90d8bc1
 # Node.js 25+ no longer ships Corepack, install it from npm
 # renovate: datasource=npm packageName=corepack
 corepack_version=0.36.0
@@ -21,36 +26,35 @@ corepack_version=0.36.0
 # Create a new empty container image
 container=$(buildah from scratch)
 
-# Reuse existing nodebuilder-kickstart container, to speed up builds
-if ! buildah containers --format "{{.ContainerName}}" | grep -q nodebuilder-kickstart; then
+# Reuse existing nodebuilder-kumomta container, to speed up builds
+if ! buildah containers --format "{{.ContainerName}}" | grep -q nodebuilder-kumomta; then
     echo "Pulling NodeJS runtime..."
-    buildah from --name nodebuilder-kickstart -v "${PWD}:/usr/src:Z" docker.io/library/node:26.13.0-slim
-    buildah run nodebuilder-kickstart sh -c "npm install -g corepack@${corepack_version} && corepack enable"
+    buildah from --name nodebuilder-kumomta -v "${PWD}:/usr/src:Z" docker.io/library/node:26.13.0-slim
+    buildah run nodebuilder-kumomta sh -c "npm install -g corepack@${corepack_version} && corepack enable"
 fi
 
 echo "Build static UI files with node..."
 buildah run \
     --workingdir=/usr/src/ui \
     --env="NODE_OPTIONS=--openssl-legacy-provider" \
-    nodebuilder-kickstart \
+    nodebuilder-kumomta \
     sh -c "yarn install && yarn build"
 
 # Add imageroot directory to the container image
 buildah add "${container}" imageroot /imageroot
 buildah add "${container}" ui/dist /ui
-# Setup the entrypoint, ask to reserve one TCP port with the label and set a rootless container
-# Select you image(s) with the label org.nethserver.images
-# ghcr.io/xxxxx is the GitHub container registry or your own registry or docker.io for Docker Hub
-# The image tag is set to latest by default, but can be overridden with the IMAGETAG environment variable
-# --label="org.nethserver.images=docker.io/mariadb:13.0.2 docker.io/roundcube/roundcubemail:1.6.19-apache"
-# rootfull=0 === rootless container
-# tcp-ports-demand=1 number of tcp Port to reserve , 1 is the minimum, can be udp or tcp
+# - rootless: kumod binds the SMTP ports with the host network (NS8 sets
+#   net.ipv4.ip_unprivileged_port_start=23), like ns8-mail
+# - one TCP port: the KumoMTA HTTP API on 127.0.0.1
+# - node:fwadm opens the SMTP ports, traefik@node:fulladm gives the TLS
+#   certificate of the host name and the optional metrics route
 buildah config --entrypoint=/ \
-    --label="org.nethserver.authorizations=traefik@node:routeadm" \
+    --label="org.nethserver.authorizations=traefik@node:fulladm node:fwadm" \
     --label="org.nethserver.tcp-ports-demand=1" \
     --label="org.nethserver.rootfull=0" \
     --label="org.nethserver.min-core=3.20.1" \
-    --label="org.nethserver.images=docker.io/postgres:17.11-alpine docker.io/nginx:1.31.7-alpine" \
+    --label="org.nethserver.volumes=kumomta-spool" \
+    --label="org.nethserver.images=ghcr.io/kumocorp/kumomta:${KUMOMTA_VERSION}" \
     "${container}"
 # Commit the image
 buildah commit "${container}" "${repobase}/${reponame}"

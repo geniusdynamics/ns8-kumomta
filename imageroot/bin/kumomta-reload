@@ -1,0 +1,20 @@
+#!/usr/bin/env python3
+
+#
+# Copyright (C) 2026 Genius Dynamics
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+
+# Apply the rendered policy without restarting kumod: a configuration
+# epoch bump re-evaluates the memoized data files and the event handlers.
+# The SMTP sessions and the queues stay up.
+
+import sys
+import kumomta_ns8 as kumo
+
+try:
+    kumo.api_request("/api/admin/bump-config-epoch", method="POST")
+except Exception as ex:
+    print(f"Configuration epoch bump failed: {ex}", file=sys.stderr)
+    sys.exit(1)
+print("KumoMTA configuration reloaded", file=sys.stderr)

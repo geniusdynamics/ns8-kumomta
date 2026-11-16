@@ -1,0 +1,14 @@
+#
+# Copyright (C) 2026 Genius Dynamics
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+
+# KumoMTA never removes its log segments: keep 7 days of them
+
+[Unit]
+Description=Remove the KumoMTA log segments older than 7 days
+
+[Service]
+Type=oneshot
+SyslogIdentifier=%N
+ExecStart=-/usr/bin/podman exec kumomta find /var/log/kumomta -maxdepth 1 -type f -name "2*" -mtime +7 -delete

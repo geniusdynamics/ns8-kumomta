@@ -1,0 +1,79 @@
+#!/usr/bin/env python3
+
+#
+# Copyright (C) 2026 Genius Dynamics
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+
+# Live view of the queues, from /metrics.json of the kumod HTTP API
+# (127.0.0.1, module credentials): totals, scheduled messages by
+# destination domain and delivery counters by destination provider.
+# No secrets.
+
+import json
+import sys
+import kumomta_ns8 as kumo
+
+
+def by_label(metrics, name, label):
+    value = (metrics.get(name) or {}).get("value") or {}
+    if isinstance(value, dict):
+        return value.get(label) or {}
+    return {}
+
+
+def gauge(metrics, name):
+    value = (metrics.get(name) or {}).get("value")
+    return value if isinstance(value, (int, float)) else 0
+
+
+def internal(name):
+    # Queues of the log hooks (webhook), not mail
+    return name.endswith(".log_hook") or name.startswith("lua")
+
+
+try:
+    metrics = kumo.api_request("/metrics.json")
+except Exception as ex:
+    print(f"Cannot read the metrics of kumod: {ex}", file=sys.stderr)
+    json.dump({"running": False, "totals": {}, "queues": [], "providers": []}, fp=sys.stdout)
+    sys.exit(0)
+
+scheduled = by_label(metrics, "scheduled_by_domain", "domain")
+queues = sorted(
+    [{"domain": d, "scheduled": int(n)} for d, n in scheduled.items() if not internal(d) and n],
+    key=lambda q: (-q["scheduled"], q["domain"]))
+
+delivered = by_label(metrics, "total_messages_delivered_by_provider", "provider")
+transfail = by_label(metrics, "total_messages_transfail_by_provider", "provider")
+failed = by_label(metrics, "total_messages_fail_by_provider", "provider")
+queued = by_label(metrics, "queued_count_by_provider", "provider")
+connections = by_label(metrics, "connection_count_by_provider", "provider")
+providers = []
+for name in sorted(set(delivered) | set(transfail) | set(failed) | set(queued)):
+    if internal(name):
+        continue
+    providers.append({
+        "provider": name,
+        "delivered": int(delivered.get(name, 0)),
+        "deferred": int(transfail.get(name, 0)),
+        "bounced": int(failed.get(name, 0)),
+        "queued": int(queued.get(name, 0)),
+        "connections": int(connections.get(name, 0)),
+    })
+providers.sort(key=lambda p: (-(p["queued"] + p["delivered"] + p["deferred"] + p["bounced"]), p["provider"]))
+
+received = by_label(metrics, "total_messages_received", "service")
+rejections = by_label(metrics, "smtp_server_rejections", "service")
+disk = by_label(metrics, "disk_free_percent", "name")
+totals = {
+    "scheduled": sum(q["scheduled"] for q in queues),
+    "received": int(received.get("esmtp_listener", 0)),
+    "rejected": int(rejections.get("total", 0)),
+    "delivered": sum(p["delivered"] for p in providers),
+    "deferred": sum(p["deferred"] for p in providers),
+    "bounced": sum(p["bounced"] for p in providers),
+    "spool_free_percent": int(disk.get("data spool", 0)),
+}
+
+json.dump({"running": True, "totals": totals, "queues": queues[:50], "providers": providers[:50]}, fp=sys.stdout)

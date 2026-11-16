@@ -1,15 +1,18 @@
 #!/bin/bash
 
 #
-# Copyright (C) 2023 Nethesis S.r.l.
+# Copyright (C) 2026 Genius Dynamics
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
-
-# If the control reaches this step, the service can be enabled and started
 
 set -e
 
 # Redirect any output to the journal (stderr)
 exec 1>&2
 
-systemctl --user try-restart kickstart.service
+systemctl --user daemon-reload
+systemctl --user try-restart kumomta.service
+if systemctl --user -q is-enabled kumomta.service; then
+    systemctl --user enable --now kumomta-logs-cleanup.timer
+fi
+rm -f .restart-required .reload-required

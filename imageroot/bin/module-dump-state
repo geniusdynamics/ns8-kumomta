@@ -1,11 +1,18 @@
 #!/bin/bash
 
 #
-# Copyright (C) 2022 Nethesis S.r.l.
+# Copyright (C) 2026 Genius Dynamics
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
 
-set -e
+# Before the backup: ask kumod to flush the spool (RocksDB) to disk, so the
+# copy of the live volume is as consistent as possible. Best effort.
 
-echo "Dumping kickstart postgres database"
-podman exec postgresql-app pg_dump -U postgres --format=c  kickstart > kickstart.pg_dump
+runagent python3 - <<'PYEOF' || :
+import kumomta_ns8 as kumo
+for spool in ("data", "meta"):
+    try:
+        kumo.api_request("/api/admin/spool-compact/v1", method="POST", body={"name": spool}, timeout=120)
+    except Exception as ex:
+        print(f"spool {spool} flush skipped: {ex}")
+PYEOF

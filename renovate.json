@@ -2,5 +2,14 @@
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
     "local>NethServer/.github:ns8-automerge"
+  ],
+  "packageRules": [
+    {
+      "description": "KumoMTA tags are dated releases with a commit suffix (2026.09.29-b90d8bc1): compare the date, ignore the per-arch and dev tags",
+      "matchDatasources": ["docker"],
+      "matchPackageNames": ["ghcr.io/kumocorp/kumomta"],
+      "versioning": "regex:^(?<major>\\d{4})\\.(?<minor>\\d{2})\\.(?<patch>\\d{2})-[0-9a-f]{8}$",
+      "automerge": false
+    }
   ]
 }

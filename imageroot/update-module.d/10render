@@ -1,0 +1,17 @@
+#!/usr/bin/env python3
+
+#
+# Copyright (C) 2026 Genius Dynamics
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+
+# The new image may bring a new policy template: render it again before
+# 20restart restarts kumod
+
+import os
+import kumomta_ns8 as kumo
+
+settings = kumo.load_settings()
+if settings["hostname"]:
+    kumo.ensure_api_credentials()
+    kumo.write_config(settings)

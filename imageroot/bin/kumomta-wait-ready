@@ -1,0 +1,36 @@
+#!/usr/bin/env python3
+
+#
+# Copyright (C) 2026 Genius Dynamics
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+
+# ExecStartPost of kumomta.service: the unit is started only once kumod
+# answers on its HTTP API and on its SMTP listeners.
+
+import socket
+import sys
+import time
+import kumomta_ns8 as kumo
+
+settings = kumo.load_settings()
+deadline = time.time() + 170
+last = None
+while time.time() < deadline:
+    try:
+        kumo.api_request("/api/check-liveness/v1", timeout=5)
+        for port in kumo.listener_ports(settings):
+            with socket.create_connection(("127.0.0.1", port), timeout=5) as sock:
+                sock.settimeout(10)
+                banner = sock.recv(512)
+                if not banner.startswith(b"220"):
+                    raise RuntimeError(f"port {port}: unexpected banner {banner!r}")
+                sock.sendall(b"QUIT\r\n")
+        sys.exit(0)
+    except Exception as ex:
+        if str(ex) != last:
+            print(f"kumod not ready yet: {ex}", file=sys.stderr)
+            last = str(ex)
+        time.sleep(2)
+print("kumod did not become ready", file=sys.stderr)
+sys.exit(1)

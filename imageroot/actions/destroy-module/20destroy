@@ -1,1 +1,28 @@
-# Placeholder, see bug NethServer/dev#7058
+#!/usr/bin/env python3
+
+#
+# Copyright (C) 2026 Genius Dynamics
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+
+# Close the SMTP ports, drop the smarthost provider key and the metrics
+# route. Errors are ignored: the module is going away.
+
+import os
+import sys
+import agent
+import agent.tasks
+
+agent.remove_public_service(os.environ['MODULE_ID'])
+
+try:
+    with agent.redis_connect(privileged=True) as prdb:
+        prdb.delete(os.environ['AGENT_ID'] + "/srv/tcp/submission")
+except Exception as ex:
+    print(agent.SD_WARNING + f"Cannot remove the submission service key: {ex}", file=sys.stderr)
+
+traefik_id = agent.resolve_agent_id('traefik@node')
+if traefik_id:
+    agent.tasks.run(agent_id=traefik_id, action='delete-route',
+                    data={'instance': os.environ['MODULE_ID'] + '-metrics'},
+                    extra={'isNotificationHidden': True})

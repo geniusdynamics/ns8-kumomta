@@ -1,26 +1,51 @@
 #!/usr/bin/env python3
 
 #
-# Copyright (C) 2022 Nethesis S.r.l.
+# Copyright (C) 2026 Genius Dynamics
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
 
-#
-# Read configuration
-#
+# Return the settings. Secrets are never returned: only *_set markers.
+# Readers of the module can run this action.
 
+import json
 import os
 import sys
-import json
 import agent
+import kumomta_ns8 as kumo
 
-# Prepare return variable
-config = {}
+settings = kumo.load_settings()
+config = {k: settings[k] for k in kumo.DEFAULTS if not k.endswith("_set")}
 
-# Read current configuration from the environment file
-config["host"] = os.getenv("TRAEFIK_HOST","")
-config["http2https"] = os.getenv("TRAEFIK_HTTP2HTTPS") == "True"
-config["lets_encrypt"] = agent.get_route(os.environ['MODULE_ID']).get('lets_encrypt', False)
+config["smtp_users"] = [{"username": name} for name in sorted(kumo.read_smtp_users())]
+domains = []
+for dom in settings["domains"]:
+    keyfile, pubfile = kumo.dkim_paths(dom["domain"], dom["selector"])
+    if settings["vault_enabled"]:
+        if os.path.exists(keyfile):
+            location = "local_not_in_openbao" # generate-dkim-key moves it
+        else:
+            location = "openbao" if os.path.exists(pubfile) else "missing"
+    else:
+        location = "local" if os.path.exists(keyfile) else "missing"
+    domains.append(dict(dom, dkim_record=kumo.dkim_record(dom["domain"], dom["selector"]),
+                        key_location=location))
+config["domains"] = domains
 
-# Dump the configuration to stdout
+config["smarthost_password_set"] = bool(settings["smarthost_password_set"])
+config["webhook_token_set"] = bool(settings["webhook_token_set"])
+config["metrics_password_set"] = bool(settings["metrics_password_set"])
+config["vault_token_set"] = bool(kumo.read_openbao_env().get("VAULT_TOKEN"))
+
+# Facts for the UI
+cnet, node_address = kumo.cluster_info()
+config["cluster_network"] = cnet or ""
+config["node_address"] = node_address or ""
+config["cluster_relay_active"] = kumo.offers_cluster_relay(settings)
+try:
+    config["mail_modules"] = sorted(kumo.mail_modules_on_node())
+except Exception:
+    config["mail_modules"] = []
+config["api_port"] = int(os.environ.get("TCP_PORT", 0))
+
 json.dump(config, fp=sys.stdout)

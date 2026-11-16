@@ -1,0 +1,64 @@
+#!/usr/bin/env python3
+
+#
+# Copyright (C) 2026 Genius Dynamics
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+
+# Recent delivery events from the KumoMTA log segments (zstd JSON lines),
+# decoded by the tailer tool of the image. Only closed segments are read
+# (a segment closes every minute). No secrets: addresses, queue, response.
+
+import json
+import subprocess
+import sys
+
+try:
+    request = json.load(sys.stdin) or {}
+except ValueError:
+    request = {}
+types = request.get("types") or ["Bounce", "TransientFailure", "Expiration", "Delivery"]
+limit = int(request.get("limit") or 100)
+segments = int(request.get("segments") or 30)
+
+# Copy the last closed (read-only) segments to a scratch directory and
+# decode them there: the tailer checkpoint never touches the log directory
+script = r'''
+set -e
+d=$(mktemp -d)
+trap 'rm -rf "$d"' EXIT
+cd /var/log/kumomta
+for f in $(ls -1 | grep -E '^[0-9]{8}-' | sort | tail -n "$1"); do
+    [ -w "$f" ] || cp "$f" "$d/"
+done
+timeout 4 tailer --batch-latency 100ms "$d" || :
+'''
+proc = subprocess.run(["podman", "exec", "kumomta", "bash", "-c", script, "bash", str(segments)],
+                      capture_output=True, text=True, timeout=60)
+events = []
+for line in proc.stdout.splitlines():
+    try:
+        rec = json.loads(line)
+    except ValueError:
+        continue
+    if rec.get("type") not in types:
+        continue
+    if str(rec.get("queue", "")).endswith(".log_hook"):
+        continue
+    response = rec.get("response") or {}
+    peer = rec.get("peer_address") or {}
+    events.append({
+        "time": rec.get("timestamp"),
+        "type": rec.get("type"),
+        "queue": rec.get("queue", ""),
+        "sender": rec.get("sender", ""),
+        "recipient": rec.get("recipient", ""),
+        "site": rec.get("site", ""),
+        "peer": peer.get("name") or "",
+        "code": response.get("code"),
+        "response": (response.get("content") or "")[:300],
+        "classification": rec.get("bounce_classification", ""),
+        "attempts": rec.get("num_attempts", 0),
+    })
+events.sort(key=lambda e: e["time"] or 0, reverse=True)
+json.dump({"events": events[:limit]}, fp=sys.stdout)

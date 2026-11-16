@@ -1,0 +1,39 @@
+#!/usr/bin/env python3
+
+#
+# Copyright (C) 2026 Genius Dynamics
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+
+# Optional Traefik route to the Prometheus metrics of kumod: only the
+# /metrics path of the metrics host name. kumod itself requires the HTTP
+# basic credentials of the "metrics" user (acl.toml grants it /metrics and
+# /metrics.json only); the admin API is never routed.
+
+import os
+import sys
+import agent
+import agent.tasks
+import kumomta_ns8 as kumo
+
+settings = kumo.load_settings()
+route_id = os.environ['MODULE_ID'] + '-metrics'
+
+if settings["metrics_host"]:
+    route = {
+        'instance': route_id,
+        'url': 'http://127.0.0.1:' + os.environ['TCP_PORT'],
+        'host': settings["metrics_host"],
+        'path': '/metrics',
+        'strip_prefix': False,
+        'http2https': True,
+        'lets_encrypt': settings["lets_encrypt"],
+    }
+    if settings["metrics_allowlist"]:
+        route['ip_allowlist'] = settings["metrics_allowlist"]
+    agent.set_route(route)
+else:
+    traefik_id = agent.resolve_agent_id('traefik@node')
+    if traefik_id:
+        agent.tasks.run(agent_id=traefik_id, action='delete-route',
+                        data={'instance': route_id}, extra={'isNotificationHidden': True})

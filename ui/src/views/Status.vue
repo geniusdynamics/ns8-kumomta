@@ -43,9 +43,9 @@
       <cv-column :md="4" :max="4">
         <NsInfoCard
           light
-          :title="$t('status.kickstart_webapp')"
-          :description="this.host ? this.host : $t('status.not_configured')"
-          :icon="Wikis32"
+          :title="host ? host : $t('status.not_configured')"
+          :description="listenersDescription"
+          :icon="Email32"
           :loading="loading.getConfiguration"
           :isErrorShown="error.getConfiguration"
           :errorTitle="$t('error.cannot_retrieve_configuration')"
@@ -54,13 +54,13 @@
         >
           <template slot="content">
             <NsButton
-              v-if="this.host"
+              v-if="host"
               kind="ghost"
-              :icon="Launch20"
+              :icon="ArrowRight20"
               :disabled="loading.getConfiguration"
-              @click="goToWebapp"
+              @click="goToAppPage(instanceName, 'queue')"
             >
-              {{ $t("status.open_webapp") }}
+              {{ $t("status.open_queue") }}
             </NsButton>
             <NsButton
               v-else
@@ -317,6 +317,7 @@ export default {
       isRedirectChecked: false,
       redirectTimeout: 0,
       host: "",
+      ports: [],
       status: {
         instance: "",
         services: [],
@@ -340,6 +341,12 @@ export default {
   },
   computed: {
     ...mapState(["instanceName", "instanceLabel", "core", "appName"]),
+    listenersDescription() {
+      if (!this.ports.length) {
+        return this.$t("status.mta");
+      }
+      return this.$t("status.listening_on", { ports: this.ports.join(", ") });
+    },
     installationNodeTitle() {
       if (this.status && this.status.node) {
         if (this.status.node_ui_name) {
@@ -384,9 +391,6 @@ export default {
     this.listBackupRepositories();
   },
   methods: {
-    goToWebapp() {
-      window.open(`https://${this.host}`, "_blank");
-    },
     async getConfiguration() {
       this.loading.getConfiguration = true;
       this.error.getConfiguration = "";
@@ -431,7 +435,15 @@ export default {
     },
     getConfigurationCompleted(taskContext, taskResult) {
       const config = taskResult.output;
-      this.host = config.host;
+      this.host = config.hostname;
+      const ports = [];
+      if (config.inbound_enabled) {
+        ports.push(config.inbound_port);
+      }
+      if (config.submission_enabled) {
+        ports.push(config.submission_port);
+      }
+      this.ports = ports;
       this.loading.getConfiguration = false;
     },
     async getStatus() {

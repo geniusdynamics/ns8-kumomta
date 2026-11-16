@@ -1,0 +1,134 @@
+#!/usr/bin/env python3
+
+#
+# Copyright (C) 2026 Genius Dynamics
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+
+# Store the settings (state/settings.json, no secrets) and the secrets
+# (0600 files under state/secrets, state/openbao.env, or OpenBao itself).
+# A field missing from the input keeps its current value.
+
+import json
+import os
+import sys
+import agent
+import kumomta_ns8 as kumo
+
+data = json.load(sys.stdin)
+current = kumo.load_settings()
+settings = dict(current)
+settings.update({k: v for k, v in data.items() if k in kumo.DEFAULTS and not k.endswith("_set")})
+
+# Normalize
+settings["hostname"] = settings["hostname"].lower()
+settings["relay_networks"] = [kumo.normalize_network(n) for n in settings["relay_networks"]]
+settings["metrics_allowlist"] = [kumo.normalize_network(n) for n in settings["metrics_allowlist"]]
+settings["metrics_host"] = settings["metrics_host"].lower()
+settings["domains"] = sorted([{
+    "domain": d["domain"].lower(),
+    "selector": d.get("selector") or "kumo1",
+} for d in settings["domains"]], key=lambda d: d["domain"])
+settings["inbound_routes"] = sorted([{
+    "domain": r["domain"].lower(),
+    "host": r["host"],
+    "port": int(r.get("port") or 25),
+} for r in settings["inbound_routes"]], key=lambda r: r["domain"])
+settings["shaping"] = sorted([dict(r, domain=r["domain"].lower()) for r in settings["shaping"]],
+                             key=lambda r: r["domain"])
+settings["vault_address"] = settings["vault_address"].rstrip("/")
+
+os.makedirs(kumo.SECRETS_DIR, mode=0o700, exist_ok=True)
+kumo.ensure_api_credentials()
+
+
+def validation_failed(field, code):
+    agent.set_status('validation-failed')
+    json.dump([{'field': field, 'parameter': field, 'value': '', 'error': code}], fp=sys.stdout)
+    sys.exit(3)
+
+
+# OpenBao / Vault environment of kumod (VAULT_ADDR, VAULT_TOKEN): 0600,
+# loaded by kumomta.service with EnvironmentFile=, never written in Lua
+if settings["vault_enabled"]:
+    token = data.get("vault_token") or kumo.read_openbao_env().get("VAULT_TOKEN", "")
+    kumo.write_openbao_env(settings["vault_address"], token)
+else:
+    kumo.remove_openbao_env()
+
+
+def store_secret(name, field, value):
+    """Local 0600 file, or a KV v2 secret when OpenBao is enabled"""
+    if settings["vault_enabled"]:
+        try:
+            kumo.openbao_write(settings, kumo.openbao_secret_path(settings, name), value)
+        except RuntimeError as ex:
+            print(agent.SD_ERR + str(ex), file=sys.stderr)
+            validation_failed(field, "openbao_write_failed")
+        kumo.remove_secret(f"{name}_password" if name == "smarthost" else f"{name}_token")
+    else:
+        kumo.write_secret(f"{name}_password" if name == "smarthost" else f"{name}_token", value)
+
+
+if data.get("smarthost_password"):
+    store_secret("smarthost", "smarthost_password", data["smarthost_password"])
+    settings["smarthost_password_set"] = True
+elif not settings["vault_enabled"]:
+    settings["smarthost_password_set"] = bool(kumo.read_secret("smarthost_password"))
+
+if data.get("webhook_token_clear"):
+    kumo.remove_secret("webhook_token")
+    settings["webhook_token_set"] = False
+elif data.get("webhook_token"):
+    store_secret("webhook", "webhook_token", data["webhook_token"])
+    settings["webhook_token_set"] = True
+elif not settings["vault_enabled"]:
+    settings["webhook_token_set"] = bool(kumo.read_secret("webhook_token"))
+
+# The metrics password is checked by kumod itself: always a local file
+if data.get("metrics_password"):
+    kumo.write_secret("metrics_password", data["metrics_password"])
+if not settings["metrics_host"] and "metrics_host" in data:
+    kumo.remove_secret("metrics_password")
+settings["metrics_password_set"] = bool(kumo.read_secret("metrics_password"))
+
+# SMTP AUTH users: salted SHA-256, the list replaces the current one
+if "smtp_users" in data:
+    known = kumo.read_smtp_users()
+    users = {}
+    for user in data["smtp_users"]:
+        name = user["username"]
+        if user.get("password"):
+            salt, digest = kumo.hash_password(user["password"])
+            users[name] = {"salt": salt, "sha256": digest}
+        elif name in known:
+            users[name] = known[name]
+    kumo.write_smtp_users(users)
+    settings["smtp_users"] = sorted(users)
+elif not os.path.exists(os.path.join(kumo.SECRETS_DIR, "smtp_users.toml")):
+    kumo.write_smtp_users({})
+
+# DKIM keys of the sending domains. Local mode: generate the missing keys.
+# OpenBao mode: keys are written to OpenBao by generate-dkim-key, so that
+# they never live on the volume.
+for dom in settings["domains"]:
+    keyfile, pubfile = kumo.dkim_paths(dom["domain"], dom["selector"])
+    if os.path.exists(keyfile) and not os.path.exists(pubfile):
+        with open(keyfile) as fp:
+            kumo.store_dkim_public(dom["domain"], dom["selector"], kumo.public_from_private(fp.read()))
+    if settings["vault_enabled"] or os.path.exists(keyfile) or os.path.exists(pubfile):
+        continue
+    pem, public = kumo.generate_dkim_key()
+    kumo.store_dkim_private(dom["domain"], dom["selector"], pem)
+    kumo.store_dkim_public(dom["domain"], dom["selector"], public)
+    print(f"Generated the DKIM key {dom['selector']} of {dom['domain']}", file=sys.stderr)
+
+kumo.save_settings(settings)
+
+# Non-secret values other modules and the units may read
+agent.set_env("KUMO_HOSTNAME", settings["hostname"])
+agent.set_env("KUMO_INBOUND_PORT", settings["inbound_port"] if settings["inbound_enabled"] else "")
+agent.set_env("KUMO_SUBMISSION_PORT", settings["submission_port"] if settings["submission_enabled"] else "")
+agent.set_env("KUMO_LETS_ENCRYPT", settings["lets_encrypt"])
+agent.set_env("KUMO_VAULT_ENABLED", settings["vault_enabled"])
+agent.dump_env()

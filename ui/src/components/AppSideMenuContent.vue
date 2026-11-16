@@ -22,11 +22,46 @@
         <span>{{ $t("status.title") }}</span>
       </cv-side-nav-link>
       <cv-side-nav-link
+        @click="goToAppPage(instanceName, 'queue')"
+        :class="{ 'current-page': isLinkActive('queue') }"
+      >
+        <template v-slot:nav-icon><Email20 /></template>
+        <span>{{ $t("queue.title") }}</span>
+      </cv-side-nav-link>
+      <cv-side-nav-link
         @click="goToAppPage(instanceName, 'settings')"
         :class="{ 'current-page': isLinkActive('settings') }"
       >
         <template v-slot:nav-icon><Settings20 /></template>
         <span>{{ $t("settings.title") }}</span>
+      </cv-side-nav-link>
+      <cv-side-nav-link
+        @click="goToAppPage(instanceName, 'users')"
+        :class="{ 'current-page': isLinkActive('users') }"
+      >
+        <template v-slot:nav-icon><UserMultiple20 /></template>
+        <span>{{ $t("users.title") }}</span>
+      </cv-side-nav-link>
+      <cv-side-nav-link
+        @click="goToAppPage(instanceName, 'domains')"
+        :class="{ 'current-page': isLinkActive('domains') }"
+      >
+        <template v-slot:nav-icon><Certificate20 /></template>
+        <span>{{ $t("domains.title") }}</span>
+      </cv-side-nav-link>
+      <cv-side-nav-link
+        @click="goToAppPage(instanceName, 'delivery')"
+        :class="{ 'current-page': isLinkActive('delivery') }"
+      >
+        <template v-slot:nav-icon><DeliveryTruck20 /></template>
+        <span>{{ $t("delivery.title") }}</span>
+      </cv-side-nav-link>
+      <cv-side-nav-link
+        @click="goToAppPage(instanceName, 'openbao')"
+        :class="{ 'current-page': isLinkActive('openbao') }"
+      >
+        <template v-slot:nav-icon><Locked20 /></template>
+        <span>{{ $t("openbao.title") }}</span>
       </cv-side-nav-link>
       <cv-side-nav-link
         @click="goToAppPage(instanceName, 'about')"
@@ -43,6 +78,11 @@
 import Settings20 from "@carbon/icons-vue/es/settings/20";
 import Information20 from "@carbon/icons-vue/es/information/20";
 import Activity20 from "@carbon/icons-vue/es/activity/20";
+import Email20 from "@carbon/icons-vue/es/email/20";
+import UserMultiple20 from "@carbon/icons-vue/es/user--multiple/20";
+import Certificate20 from "@carbon/icons-vue/es/certificate/20";
+import DeliveryTruck20 from "@carbon/icons-vue/es/delivery-truck/20";
+import Locked20 from "@carbon/icons-vue/es/locked/20";
 import { mapState } from "vuex";
 import { QueryParamService, UtilService } from "@nethserver/ns8-ui-lib";
 
@@ -52,6 +92,11 @@ export default {
     Settings20,
     Information20,
     Activity20,
+    Email20,
+    UserMultiple20,
+    Certificate20,
+    DeliveryTruck20,
+    Locked20,
   },
   mixins: [QueryParamService, UtilService],
   data() {

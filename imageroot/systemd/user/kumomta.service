@@ -1,0 +1,63 @@
+#
+# Copyright (C) 2026 Genius Dynamics
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+
+#
+# KumoMTA (kumod), rootless, with the network of the host like ns8-mail:
+# NS8 lowers net.ipv4.ip_unprivileged_port_start to 23, so the module user
+# binds the SMTP ports itself and kumod sees the real client addresses.
+# The HTTP API listens on 127.0.0.1:${TCP_PORT} only.
+#
+# --userns=keep-id maps the module user to the kumod user (999) of the
+# image: kumod reads the 0600 files of the state directory (secrets, DKIM
+# keys, TLS key) and owns the spool, without root in the container.
+#
+
+[Unit]
+Description=KumoMTA mail transfer agent
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Environment=PODMAN_SYSTEMD_UNIT=%n
+EnvironmentFile=%S/state/environment
+# VAULT_ADDR and VAULT_TOKEN of the OpenBao/Vault key sources (0600)
+EnvironmentFile=-%S/state/openbao.env
+WorkingDirectory=%S/state
+Restart=always
+RestartSec=10
+# kumod flushes its queues and logs on stop
+TimeoutStopSec=150
+TimeoutStartSec=300
+ExecStartPre=/bin/rm -f %t/kumomta.pid %t/kumomta.ctr-id
+ExecStartPre=/bin/mkdir -p kumomta secrets dkim tls
+ExecStart=/usr/bin/podman run \
+    --detach \
+    --conmon-pidfile=%t/kumomta.pid \
+    --cidfile=%t/kumomta.ctr-id \
+    --cgroups=no-conmon \
+    --replace --name=%N \
+    --network=host \
+    --userns=keep-id:uid=999,gid=999 \
+    --user=999:999 \
+    --env=VAULT_ADDR \
+    --env=VAULT_TOKEN \
+    --volume=./kumomta:/opt/kumomta/etc/policy:ro,z \
+    --volume=./secrets:/opt/kumomta/etc/secrets:ro,z \
+    --volume=./dkim:/opt/kumomta/etc/dkim:ro,z \
+    --volume=./tls:/opt/kumomta/etc/tls:ro,z \
+    --volume=kumomta-spool:/var/spool/kumomta:Z \
+    --volume=kumomta-logs:/var/log/kumomta:Z \
+    ${KUMOMTA_IMAGE} \
+    /opt/kumomta/sbin/kumod --policy /opt/kumomta/etc/policy/init.lua
+ExecStartPost=runagent kumomta-wait-ready
+ExecReload=runagent kumomta-reload
+ExecStop=/usr/bin/podman stop --ignore --cidfile %t/kumomta.ctr-id -t 120
+ExecStopPost=/usr/bin/podman rm --ignore -f --cidfile %t/kumomta.ctr-id
+PIDFile=%t/kumomta.pid
+Type=forking
+SyslogIdentifier=%N
+
+[Install]
+WantedBy=default.target

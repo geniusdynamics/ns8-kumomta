@@ -1,0 +1,43 @@
+#!/usr/bin/env python3
+
+#
+# Copyright (C) 2026 Genius Dynamics
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+
+# Smarthost provider for the cluster. The core "Email notifications"
+# settings (cluster get-smarthost) list the modules publishing
+# module/<id>/srv/tcp/submission and configure the chosen one with its
+# host, port 25, no TLS and no authentication: that is the port-25
+# listener of kumod, which relays for the cluster network. Without it
+# (outbound-only mode, another port) the key is removed: the core would
+# configure a port nobody listens on.
+
+import json
+import os
+import agent
+import kumomta_ns8 as kumo
+
+settings = kumo.load_settings()
+agent_id = os.environ['AGENT_ID']
+key = agent_id + "/srv/tcp/submission"
+_, node_address = kumo.cluster_info()
+
+with agent.redis_connect(privileged=True) as prdb:
+    trx = prdb.pipeline()
+    trx.delete(key)
+    if kumo.offers_cluster_relay(settings) and node_address:
+        trx.hset(key, mapping={
+            "host": node_address,
+            "port": str(settings["inbound_port"]),
+            "node": os.environ['NODE_ID'],
+            "module_uuid": os.environ.get('MODULE_UUID', ''),
+            "mail_hostname": settings["hostname"],
+            "relay_only": "1",
+        })
+    trx.publish(agent_id + "/event/submission-changed", json.dumps({
+        "module_id": os.environ['MODULE_ID'],
+        "module_uuid": os.environ.get('MODULE_UUID', ''),
+        "node_id": int(os.environ['NODE_ID']),
+    }))
+    trx.execute()

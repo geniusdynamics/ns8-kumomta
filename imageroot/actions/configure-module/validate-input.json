@@ -1,35 +1,306 @@
 {
     "$schema": "http://json-schema.org/draft-07/schema#",
-    "title": "Configure kickstart",
-    "$id": "http://nethserver.org/json-schema/task/input/kickstart/configure-module",
-    "description": "Configure kickstart",
+    "title": "Configure kumomta",
+    "$id": "http://nethserver.org/json-schema/task/input/kumomta/configure-module",
+    "description": "Configure KumoMTA. Every field is optional: a missing field keeps its current value. Write-only secrets are never returned by get-configuration.",
     "examples": [
         {
-            "host": "kickstart.domain.org",
-            "http2https": true,
-            "lets_encrypt": true
+            "hostname": "mx.example.org",
+            "lets_encrypt": false,
+            "inbound_enabled": true,
+            "inbound_port": 25,
+            "submission_enabled": true,
+            "submission_port": 587,
+            "relay_networks": [
+                "192.168.1.0/24"
+            ],
+            "smtp_users": [
+                {
+                    "username": "app1",
+                    "password": "Secret,1234"
+                }
+            ],
+            "domains": [
+                {
+                    "domain": "example.org",
+                    "selector": "kumo1"
+                }
+            ]
         }
     ],
     "type": "object",
-    "required": [
-        "host"
-    ],
     "properties": {
-        "host": {
+        "hostname": {
             "type": "string",
-            "description": "Host name for the application, like 'kickstart.domain.org'",
             "format": "hostname",
-            "pattern": "\\."
+            "pattern": "\\.",
+            "maxLength": 253,
+            "description": "Fully qualified host name of the MTA: SMTP banner, EHLO name and TLS certificate name"
         },
         "lets_encrypt": {
             "type": "boolean",
-            "title": "Let's Encrypt certificate",
-            "description": "Request a valid Let's Encrypt certificate."
+            "description": "Request a Let's Encrypt certificate for the host name (and the metrics host name)"
         },
-        "http2https": {
+        "inbound_enabled": {
             "type": "boolean",
-            "title": "HTTP to HTTPS redirection",
-            "description": "Redirect all the HTTP requests to HTTPS"
+            "description": "Enable the inbound (MX) SMTP listener"
+        },
+        "inbound_port": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 65535,
+            "description": "Port of the inbound listener, normally 25"
+        },
+        "submission_enabled": {
+            "type": "boolean",
+            "description": "Enable the submission listener (STARTTLS + AUTH)"
+        },
+        "submission_port": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 65535,
+            "description": "Port of the submission listener, normally 587"
+        },
+        "max_message_size": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1024,
+            "description": "Maximum message size, in MiB"
+        },
+        "relay_networks": {
+            "type": "array",
+            "items": {
+                "type": "string",
+                "maxLength": 64
+            },
+            "description": "IP addresses and CIDR networks allowed to relay without authentication"
+        },
+        "cluster_relay": {
+            "type": "boolean",
+            "description": "Offer the MTA as smarthost to the cluster: relay from the cluster network and publish the submission service"
+        },
+        "smtp_users": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": [
+                    "username"
+                ],
+                "properties": {
+                    "username": {
+                        "type": "string",
+                        "pattern": "^[A-Za-z0-9._@+-]{1,128}$"
+                    },
+                    "password": {
+                        "type": "string",
+                        "maxLength": 256,
+                        "description": "Empty to keep the current password"
+                    }
+                },
+                "additionalProperties": false
+            },
+            "description": "SMTP AUTH credentials of the submitting clients. Users not listed are removed"
+        },
+        "domains": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": [
+                    "domain"
+                ],
+                "properties": {
+                    "domain": {
+                        "type": "string",
+                        "minLength": 3,
+                        "maxLength": 253
+                    },
+                    "selector": {
+                        "type": "string",
+                        "pattern": "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$"
+                    }
+                },
+                "additionalProperties": false
+            },
+            "description": "Sending domains, signed with DKIM"
+        },
+        "inbound_routes": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": [
+                    "domain",
+                    "host"
+                ],
+                "properties": {
+                    "domain": {
+                        "type": "string",
+                        "minLength": 3,
+                        "maxLength": 253
+                    },
+                    "host": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 253
+                    },
+                    "port": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 65535
+                    }
+                },
+                "additionalProperties": false
+            },
+            "description": "Domains accepted from anyone and relayed to an internal server"
+        },
+        "smarthost_enabled": {
+            "type": "boolean"
+        },
+        "smarthost_host": {
+            "type": "string",
+            "maxLength": 253
+        },
+        "smarthost_port": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 65535
+        },
+        "smarthost_tls": {
+            "type": "string",
+            "enum": [
+                "required",
+                "required_insecure",
+                "opportunistic",
+                "disabled"
+            ]
+        },
+        "smarthost_username": {
+            "type": "string",
+            "maxLength": 256
+        },
+        "smarthost_password": {
+            "type": "string",
+            "maxLength": 1024,
+            "description": "Write only. Empty keeps the current password"
+        },
+        "shaping": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": [
+                    "domain"
+                ],
+                "properties": {
+                    "domain": {
+                        "type": "string",
+                        "minLength": 3,
+                        "maxLength": 253
+                    },
+                    "connection_limit": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 10000
+                    },
+                    "max_message_rate": {
+                        "type": "string",
+                        "maxLength": 32
+                    },
+                    "max_deliveries_per_connection": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 100000
+                    }
+                },
+                "additionalProperties": false
+            },
+            "description": "Per-destination traffic shaping"
+        },
+        "retry_interval": {
+            "type": "string",
+            "maxLength": 32,
+            "description": "First retry interval of deferred messages, e.g. 20m"
+        },
+        "max_age": {
+            "type": "string",
+            "maxLength": 32,
+            "description": "Messages still undelivered after this time bounce, e.g. 5d"
+        },
+        "webhook_enabled": {
+            "type": "boolean"
+        },
+        "webhook_url": {
+            "type": "string",
+            "maxLength": 2048
+        },
+        "webhook_token": {
+            "type": "string",
+            "maxLength": 4096,
+            "description": "Write only bearer token. Empty keeps the current one"
+        },
+        "webhook_token_clear": {
+            "type": "boolean",
+            "description": "Remove the bearer token"
+        },
+        "webhook_record_types": {
+            "type": "array",
+            "items": {
+                "type": "string",
+                "enum": [
+                    "Reception",
+                    "Delivery",
+                    "Bounce",
+                    "TransientFailure",
+                    "Expiration",
+                    "AdminBounce",
+                    "OOB",
+                    "Feedback",
+                    "Rejection"
+                ]
+            }
+        },
+        "vault_enabled": {
+            "type": "boolean",
+            "description": "Read the secrets from OpenBao/Vault (KV v2)"
+        },
+        "vault_address": {
+            "type": "string",
+            "maxLength": 2048,
+            "description": "VAULT_ADDR, e.g. https://vault.example.org"
+        },
+        "vault_token": {
+            "type": "string",
+            "maxLength": 4096,
+            "description": "VAULT_TOKEN. Write only, empty keeps the current token"
+        },
+        "vault_mount": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._/-]{1,128}$"
+        },
+        "vault_path": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._/-]{1,256}$"
+        },
+        "vault_key": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._-]{0,128}$",
+            "description": "Field name of the secrets, empty for the KumoMTA default 'key'"
+        },
+        "metrics_host": {
+            "type": "string",
+            "maxLength": 253,
+            "description": "Host name of the Traefik route to /metrics, empty to disable"
+        },
+        "metrics_password": {
+            "type": "string",
+            "maxLength": 256,
+            "description": "Write only password of the 'metrics' user"
+        },
+        "metrics_allowlist": {
+            "type": "array",
+            "items": {
+                "type": "string",
+                "maxLength": 64
+            }
         }
-    }
+    },
+    "additionalProperties": false
 }

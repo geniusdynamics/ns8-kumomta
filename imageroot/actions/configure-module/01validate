@@ -1,0 +1,186 @@
+#!/usr/bin/env python3
+
+#
+# Copyright (C) 2026 Genius Dynamics
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+
+# Validate the settings, merged over the current ones. Like ns8-mailcow,
+# refuse the mail ports of another NS8 mail module of the node and the
+# ports held by another service.
+
+import json
+import os
+import subprocess
+import sys
+import agent
+import kumomta_ns8 as kumo
+
+agent.set_weight(os.path.basename(__file__), 0) # Validation step, no task progress at all
+
+data = json.load(sys.stdin)
+current = kumo.load_settings()
+settings = dict(current)
+settings.update({k: v for k, v in data.items() if k in kumo.DEFAULTS})
+errors = []
+
+
+def error(field, value, code):
+    errors.append({'field': field, 'parameter': field, 'value': value, 'error': code})
+
+
+def port_in_use(port):
+    try:
+        return agent.tcp_port_in_use(port)
+    except OSError:
+        return False # e.g. no IPv6 on the node
+
+
+hostname = (settings["hostname"] or "").lower()
+if not kumo.HOSTNAME_RE.match(hostname):
+    error("hostname", settings["hostname"], "invalid_hostname")
+
+# Listeners
+ports = kumo.listener_ports(settings)
+if not ports:
+    error("inbound_enabled", False, "no_listener_enabled")
+if settings["inbound_enabled"] and settings["submission_enabled"] \
+        and int(settings["inbound_port"]) == int(settings["submission_port"]):
+    error("submission_port", settings["submission_port"], "same_port_as_inbound")
+for field in ("inbound_port", "submission_port"):
+    if int(settings[field]) == int(os.environ.get("TCP_PORT", 0)):
+        error(field, settings[field], "port_reserved")
+    elif int(settings[field]) < 23:
+        error(field, settings[field], "port_privileged")
+
+# Another mail module of this node: its ports cannot be used
+try:
+    others = kumo.mail_modules_on_node()
+except Exception as ex:
+    print(agent.SD_WARNING + f"Cannot list the modules of the node: {ex}", file=sys.stderr)
+    others = {}
+for module_id, image in sorted(others.items()):
+    if image == "kumomta":
+        taken = []
+        try:
+            rdb = agent.redis_connect(use_replica=True)
+            renv = rdb.hgetall(f"module/{module_id}/environment") or {}
+            for key in ("KUMO_INBOUND_PORT", "KUMO_SUBMISSION_PORT"):
+                if renv.get(key):
+                    taken.append(int(renv[key]))
+        except Exception:
+            pass
+    else:
+        taken = kumo.MAIL_MODULE_PORTS[image]
+    for field in ("inbound_port", "submission_port"):
+        enabled = settings["inbound_enabled"] if field == "inbound_port" else settings["submission_enabled"]
+        if enabled and int(settings[field]) in taken:
+            error(field, f"{module_id}:{settings[field]}", "mail_module_on_node")
+
+# Ports held by another service: check those kumod does not hold already
+active = subprocess.run(['systemctl', '--user', '-q', 'is-active', 'kumomta.service']).returncode == 0
+held = kumo.listener_ports(current) if active else []
+if not errors:
+    for field in ("inbound_port", "submission_port"):
+        enabled = settings["inbound_enabled"] if field == "inbound_port" else settings["submission_enabled"]
+        port = int(settings[field])
+        if enabled and port not in held and port_in_use(port):
+            error(field, port, "port_in_use")
+
+if settings["max_message_size"] < 1:
+    error("max_message_size", settings["max_message_size"], "invalid_size")
+
+for net in settings["relay_networks"]:
+    try:
+        kumo.normalize_network(net)
+    except ValueError:
+        error("relay_networks", net, "invalid_network")
+
+# SMTP AUTH users
+known = kumo.read_smtp_users()
+names = []
+for user in data.get("smtp_users", []):
+    if user["username"] in names:
+        error("smtp_users", user["username"], "duplicate_user")
+    names.append(user["username"])
+    if not user.get("password") and user["username"] not in known:
+        error("smtp_users", user["username"], "password_required")
+    elif user.get("password") and len(user["password"]) < 8:
+        error("smtp_users", user["username"], "password_too_short")
+
+# Sending domains
+seen = []
+for dom in data.get("domains", []):
+    name = dom["domain"].lower()
+    if not kumo.DOMAIN_RE.match(name) or name.startswith("*."):
+        error("domains", dom["domain"], "invalid_domain")
+    if name in seen:
+        error("domains", dom["domain"], "duplicate_domain")
+    seen.append(name)
+
+seen = []
+for route in data.get("inbound_routes", []):
+    name = route["domain"].lower()
+    if not kumo.DOMAIN_RE.match(name):
+        error("inbound_routes", route["domain"], "invalid_domain")
+    if name in seen:
+        error("inbound_routes", route["domain"], "duplicate_domain")
+    seen.append(name)
+    if not (kumo.is_ip_address(route["host"]) or kumo.HOSTNAME_RE.match(route["host"].lower())):
+        error("inbound_routes", route["host"], "invalid_host")
+
+# Smarthost
+if settings["smarthost_enabled"]:
+    host = settings["smarthost_host"]
+    if not (kumo.is_ip_address(host) or kumo.HOSTNAME_RE.match(host.lower())):
+        error("smarthost_host", host, "invalid_host")
+    elif host.lower() in (hostname, "localhost") or host.startswith("127."):
+        error("smarthost_host", host, "smarthost_loop")
+
+# Shaping and queues
+seen = []
+for rule in data.get("shaping", []):
+    name = rule["domain"].lower()
+    if not kumo.DOMAIN_RE.match(name):
+        error("shaping", rule["domain"], "invalid_domain")
+    if name in seen:
+        error("shaping", rule["domain"], "duplicate_domain")
+    seen.append(name)
+    if rule.get("max_message_rate") and not kumo.RATE_RE.match(rule["max_message_rate"]):
+        error("shaping", rule["max_message_rate"], "invalid_rate")
+for field in ("retry_interval", "max_age"):
+    if not kumo.DURATION_RE.match(settings[field]):
+        error(field, settings[field], "invalid_duration")
+
+# Webhook
+if settings["webhook_enabled"] and not settings["webhook_url"].startswith(("http://", "https://")):
+    error("webhook_url", settings["webhook_url"], "invalid_url")
+
+# OpenBao / Vault
+if settings["vault_enabled"]:
+    if not settings["vault_address"].startswith(("http://", "https://")):
+        error("vault_address", settings["vault_address"], "invalid_url")
+    if not data.get("vault_token") and not kumo.read_openbao_env().get("VAULT_TOKEN"):
+        error("vault_token", "", "token_required")
+
+# Metrics route
+if settings["metrics_host"]:
+    mhost = settings["metrics_host"].lower()
+    if not kumo.HOSTNAME_RE.match(mhost):
+        error("metrics_host", settings["metrics_host"], "invalid_hostname")
+    elif mhost != (current["metrics_host"] or "").lower() and agent.http_route_in_use(domain=mhost, path="/metrics"):
+        error("metrics_host", settings["metrics_host"], "domain_already_used_in_traefik")
+    if not data.get("metrics_password") and not kumo.read_secret("metrics_password"):
+        error("metrics_password", "", "password_required")
+    elif data.get("metrics_password") and len(data["metrics_password"]) < 12:
+        error("metrics_password", "", "password_too_short")
+    for net in settings["metrics_allowlist"]:
+        try:
+            kumo.normalize_network(net)
+        except ValueError:
+            error("metrics_allowlist", net, "invalid_network")
+
+if errors:
+    agent.set_status('validation-failed')
+    json.dump(errors, fp=sys.stdout)
+    sys.exit(3)

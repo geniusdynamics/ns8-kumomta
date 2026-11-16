@@ -1,0 +1,37 @@
+# ACL of the KumoMTA HTTP API of ns8-kumomta. It replaces the product
+# default ACL map (set_fall_back_to_acl_map(false) in init.lua): no
+# address is trusted, every request needs HTTP basic authentication.
+
+# Health check
+[[acl."http_listener/*/api/check-liveness"]]
+allow = true
+privileges = ["GET"]
+identity.Any = {}
+
+# The module itself (actions of the NS8 module): administration
+[[acl."http_listener/*/api/admin"]]
+allow = true
+privileges = ["GET", "DELETE", "POST"]
+identity.Individual = "ns8-admin"
+
+[[acl."http_listener/*/api/inject"]]
+allow = true
+privileges = ["POST"]
+identity.Individual = "ns8-admin"
+
+[[acl."http_listener/*/api/machine-info"]]
+allow = true
+privileges = ["GET"]
+identity.Individual = "ns8-admin"
+
+# Metrics: the module, and the optional metrics user (Prometheus, through
+# the Traefik route of the metrics host name)
+[[acl."http_listener/*/metrics"]]
+allow = true
+privileges = ["GET"]
+criteria.AnyOf = [ { Identity = { Individual = "ns8-admin" } }, { Identity = { Individual = "metrics" } } ]
+
+[[acl."http_listener/*/metrics.json"]]
+allow = true
+privileges = ["GET"]
+criteria.AnyOf = [ { Identity = { Individual = "ns8-admin" } }, { Identity = { Individual = "metrics" } } ]

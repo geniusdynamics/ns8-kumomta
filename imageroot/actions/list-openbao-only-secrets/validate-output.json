@@ -1,0 +1,30 @@
+{
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "List the secrets that exist only in OpenBao",
+    "$id": "http://nethserver.org/json-schema/task/output/kumomta/list-openbao-only-secrets",
+    "description": "Secrets KumoMTA reads from OpenBao and that have no local copy. Never the values.",
+    "type": "object",
+    "required": ["vault_enabled", "items", "copyable"],
+    "properties": {
+        "vault_enabled": {"type": "boolean"},
+        "copyable": {"type": "boolean", "description": "Every item can be read with the current token"},
+        "items": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": ["kind", "name", "path", "readable"],
+                "properties": {
+                    "kind": {"type": "string", "enum": ["dkim_key", "smarthost_password", "webhook_token"]},
+                    "name": {"type": "string"},
+                    "domain": {"type": "string"},
+                    "selector": {"type": "string"},
+                    "path": {"type": "string"},
+                    "readable": {"type": "boolean"},
+                    "error": {"type": "string"}
+                },
+                "additionalProperties": false
+            }
+        }
+    },
+    "additionalProperties": false
+}

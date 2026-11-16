@@ -300,6 +300,10 @@
                 "type": "string",
                 "maxLength": 64
             }
+        },
+        "sink_enabled": {
+            "type": "boolean",
+            "description": "Testing only: accept and discard every outbound message instead of delivering it (Delivery records are still logged)"
         }
     },
     "additionalProperties": false

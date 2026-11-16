@@ -36,6 +36,7 @@ TLS_DIR = "tls"                 # -> /opt/kumomta/etc/tls
 OPENBAO_ENV = "openbao.env"     # EnvironmentFile of kumomta.service
 API_ENV = "secrets/api.env"     # credentials of the local HTTP API
 RESTART_STAMP = ".init-hash"    # hash of the settings read only at startup
+WARNINGS_FILE = ".configure-warnings.json"  # configure-module output
 
 # Paths inside the container
 C_POLICY = "/opt/kumomta/etc/policy"
@@ -94,6 +95,8 @@ DEFAULTS = {
     "vault_key": "",
     "metrics_host": "",
     "metrics_allowlist": [],
+    # Testing: accept and discard every outbound message (no delivery)
+    "sink_enabled": False,
     # Non-secret markers of the write-only secrets
     "smarthost_password_set": False,
     "webhook_token_set": False,
@@ -466,6 +469,76 @@ def openbao_write(settings, path, value, env=None):
         raise RuntimeError(f"cannot reach OpenBao: {ex}") from None
 
 
+def openbao_read(settings, path, env=None):
+    """Read the field of a KV v2 secret. Raises RuntimeError"""
+    env = env if env is not None else read_openbao_env()
+    address = env.get("VAULT_ADDR", "").rstrip("/")
+    token = env.get("VAULT_TOKEN", "")
+    if not address or not token:
+        raise RuntimeError("OpenBao address or token not set")
+    field = settings["vault_key"] or "key"
+    url = f"{address}/v1/{settings['vault_mount'].strip('/')}/data/{path}"
+    req = urllib.request.Request(url, method="GET", headers={"X-Vault-Token": token})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            payload = json.loads(resp.read() or b"{}")
+    except urllib.error.HTTPError as ex:
+        raise RuntimeError(f"OpenBao answered {ex.code} for {path}") from None
+    except (urllib.error.URLError, OSError, ValueError) as ex:
+        raise RuntimeError(f"cannot reach OpenBao: {ex}") from None
+    value = ((payload.get("data") or {}).get("data") or {}).get(field)
+    if not isinstance(value, str) or not value:
+        raise RuntimeError(f"no '{field}' field in {path}")
+    return value
+
+
+def vault_only_items(settings):
+    """Secrets that exist only in OpenBao: without OpenBao, KumoMTA cannot
+    use them. Names and paths only, never the values."""
+    if not settings["vault_enabled"]:
+        return []
+    items = []
+    for dom in settings["domains"]:
+        keyfile, pubfile = dkim_paths(dom["domain"], dom["selector"])
+        if os.path.exists(pubfile) and not os.path.exists(keyfile):
+            items.append({
+                "kind": "dkim_key",
+                "name": f"{dom['selector']}._domainkey.{dom['domain']}",
+                "domain": dom["domain"],
+                "selector": dom["selector"],
+                "path": dkim_vault_path(settings, dom["domain"], dom["selector"]),
+            })
+    if settings["smarthost_password_set"] and not read_secret("smarthost_password"):
+        items.append({"kind": "smarthost_password", "name": "smarthost_password",
+                      "path": openbao_secret_path(settings, "smarthost")})
+    if settings["webhook_token_set"] and not read_secret("webhook_token"):
+        items.append({"kind": "webhook_token", "name": "webhook_token",
+                      "path": openbao_secret_path(settings, "webhook")})
+    return items
+
+
+def copy_vault_item_to_local(settings, item, env=None):
+    """Copy one item of vault_only_items() into its local 0600 file.
+    Raises RuntimeError"""
+    value = openbao_read(settings, item["path"], env)
+    if item["kind"] == "dkim_key":
+        try:
+            public = public_from_private(value)
+        except Exception:
+            raise RuntimeError("the OpenBao value is not a PEM private key") from None
+        _, pubfile = dkim_paths(item["domain"], item["selector"])
+        with open(pubfile) as fp:
+            if fp.read().strip() != public:
+                raise RuntimeError("the OpenBao key does not match the published DKIM record")
+        store_dkim_private(item["domain"], item["selector"], value)
+    elif item["kind"] == "smarthost_password":
+        write_secret("smarthost_password", value)
+    elif item["kind"] == "webhook_token":
+        write_secret("webhook_token", value)
+    else:
+        raise RuntimeError(f"unknown item kind {item['kind']}")
+
+
 # --------------------------------------------------------------------------
 # Rendering of the KumoMTA policy
 # --------------------------------------------------------------------------
@@ -587,6 +660,7 @@ def render(settings, template_path=None):
             "username": settings["smarthost_username"],
         })
     files["queues.toml"] = toml_dumps({
+        "sink": {"enabled": bool(settings["sink_enabled"])},
         "default": {
             "egress_pool": "default",
             "retry_interval": settings["retry_interval"],

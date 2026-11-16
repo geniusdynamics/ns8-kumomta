@@ -109,6 +109,21 @@
               ref="submission_port"
               class="mg-bottom narrow"
             />
+            <NsToggle
+              value="implicitTls"
+              :label="$t('settings.implicit_tls')"
+              :checked="false"
+              :disabled="true"
+              class="mg-bottom"
+            >
+              <template #tooltip>
+                {{ $t("settings.implicit_tls_tooltip") }}
+              </template>
+              <template slot="text-left">{{
+                $t("settings.implicit_tls_unavailable")
+              }}</template>
+              <template slot="text-right">{{ $t("common.enabled") }}</template>
+            </NsToggle>
             <NsTextInput
               type="number"
               :label="$t('settings.max_message_size')"
@@ -144,7 +159,14 @@
               <template slot="text-right">{{ $t("common.enabled") }}</template>
             </NsToggle>
             <NsInlineNotification
-              v-if="cluster_relay && !(inbound_enabled && inbound_port == 25)"
+              v-if="!cluster_relay"
+              kind="info"
+              :title="$t('settings.cluster_relay_off')"
+              :description="$t('settings.cluster_relay_off_description')"
+              :showCloseButton="false"
+            />
+            <NsInlineNotification
+              v-else-if="!(inbound_enabled && inbound_port == 25)"
               kind="warning"
               :title="$t('settings.cluster_relay_needs_port_25')"
               :description="
@@ -183,6 +205,28 @@
               :disabled="busy"
               ref="max_age"
               class="mg-bottom narrow"
+            />
+
+            <h4 class="mg-bottom">{{ $t("settings.testing") }}</h4>
+            <NsToggle
+              value="sink"
+              :label="$t('settings.sink_enabled')"
+              v-model="sink_enabled"
+              :disabled="busy"
+              class="mg-bottom"
+            >
+              <template #tooltip>
+                {{ $t("settings.sink_tooltip") }}
+              </template>
+              <template slot="text-left">{{ $t("common.disabled") }}</template>
+              <template slot="text-right">{{ $t("common.enabled") }}</template>
+            </NsToggle>
+            <NsInlineNotification
+              v-if="sink_enabled"
+              kind="warning"
+              :title="$t('warnings.sink_mode_title')"
+              :description="$t('settings.sink_description')"
+              :showCloseButton="false"
             />
 
             <cv-accordion class="mg-bottom maxwidth">
@@ -287,6 +331,7 @@ export default {
       relayNetworksText: "",
       cluster_relay: true,
       cluster_relay_active: false,
+      sink_enabled: false,
       cluster_network: "",
       node_address: "",
       retry_interval: "20m",
@@ -348,6 +393,7 @@ export default {
         this.max_message_size = c.max_message_size;
         this.relayNetworksText = c.relay_networks.join("\n");
         this.cluster_relay = c.cluster_relay;
+        this.sink_enabled = c.sink_enabled;
         this.cluster_relay_active = c.cluster_relay_active;
         this.cluster_network = c.cluster_network;
         this.node_address = c.node_address;
@@ -391,6 +437,7 @@ export default {
         max_message_size: parseInt(this.max_message_size),
         relay_networks: this.linesToList(this.relayNetworksText),
         cluster_relay: this.cluster_relay,
+        sink_enabled: this.sink_enabled,
         retry_interval: this.retry_interval,
         max_age: this.max_age,
         metrics_host: this.metrics_host,

@@ -292,7 +292,28 @@ kumo.on('http_message_generated', function(msg)
   dkim_sign(msg)
 end)
 
--- Scheduled queues: retention, inbound routes, smarthost
+-- Sink mode (testing): the ns8_sink "connection" accepts and discards
+-- every message instead of delivering it, and logs a Delivery record, like
+-- the KumoMTA smart-sink example. A recipient local part containing
+-- "tempfail" or "permfail" simulates a transient failure or a bounce.
+kumo.on('ns8_sink', function(domain, tenant, campaign)
+  local connection = {}
+  function connection:send(message)
+    local user = string.lower(message:recipient().user or '')
+    if string.find(user, 'tempfail', 1, true) then
+      kumo.reject(451, '4.3.0 ns8-kumomta sink: simulated transient failure')
+    end
+    if string.find(user, 'permfail', 1, true) then
+      kumo.reject(550, '5.1.1 ns8-kumomta sink: simulated bounce')
+    end
+    return 'ns8-kumomta sink: accepted and discarded, not delivered'
+  end
+  return connection
+end)
+
+-- Scheduled queues: retention, inbound routes, smarthost. The queue
+-- configuration follows the configuration epoch, so a change applies to
+-- the existing queues at once.
 kumo.on('get_queue_config', function(domain, tenant, campaign, routing_domain)
   local q = policy_data('queues.toml')
   local default = q.default or {}
@@ -300,7 +321,12 @@ kumo.on('get_queue_config', function(domain, tenant, campaign, routing_domain)
     egress_pool = default.egress_pool or 'default',
     retry_interval = default.retry_interval,
     max_age = default.max_age,
+    refresh_strategy = 'Epoch',
   }
+  if (q.sink or {}).enabled then
+    params.protocol = { custom_lua = { constructor = 'ns8_sink' } }
+    return kumo.make_queue_config(params)
+  end
   local route = (q.route or {})[domain]
   local smarthost = q.smarthost or {}
   if route then

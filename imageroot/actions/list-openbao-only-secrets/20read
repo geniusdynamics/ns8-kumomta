@@ -1,0 +1,32 @@
+#!/usr/bin/env python3
+
+#
+# Copyright (C) 2026 Genius Dynamics
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+
+# The secrets that exist only in OpenBao (DKIM private keys, smarthost
+# password, webhook token): without OpenBao KumoMTA cannot use them. The UI
+# lists them before turning OpenBao off. Names, paths and whether the
+# current token can read each one: never the values.
+
+import json
+import sys
+import kumomta_ns8 as kumo
+
+settings = kumo.load_settings()
+items = kumo.vault_only_items(settings)
+readable_count = 0
+for item in items:
+    try:
+        kumo.openbao_read(settings, item["path"])
+        item["readable"] = True
+        readable_count += 1
+    except RuntimeError as ex:
+        item["readable"] = False
+        item["error"] = str(ex)
+json.dump({
+    "vault_enabled": bool(settings["vault_enabled"]),
+    "items": items,
+    "copyable": bool(items) and readable_count == len(items),
+}, fp=sys.stdout)

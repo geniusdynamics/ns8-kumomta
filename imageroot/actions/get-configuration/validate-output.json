@@ -302,6 +302,27 @@
         },
         "api_port": {
             "type": "integer"
+        },
+        "sink_enabled": {
+            "type": "boolean"
+        },
+        "warnings": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": [
+                    "id",
+                    "message"
+                ],
+                "properties": {
+                    "id": {
+                        "type": "string"
+                    },
+                    "message": {
+                        "type": "string"
+                    }
+                }
+            }
         }
     },
     "additionalProperties": false

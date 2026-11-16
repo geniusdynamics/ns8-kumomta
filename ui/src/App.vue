@@ -7,6 +7,18 @@
     <cv-content id="main-content" class="app-content">
       <AppSideMenu />
       <AppMobileSideMenu />
+      <cv-grid v-if="sinkModeOn" fullWidth class="app-banner">
+        <cv-row>
+          <cv-column>
+            <NsInlineNotification
+              kind="warning"
+              :title="$t('warnings.sink_mode_title')"
+              :description="$t('warnings.sink_mode_description')"
+              :showCloseButton="false"
+            />
+          </cv-column>
+        </cv-row>
+      </cv-grid>
       <router-view />
     </cv-content>
   </div>
@@ -22,13 +34,17 @@ import {
   UtilService,
 } from "@nethserver/ns8-ui-lib";
 import to from "await-to-js";
+import ModuleTask from "@/mixins/moduleTask";
 
 export default {
   name: "App",
   components: { AppSideMenu, AppMobileSideMenu },
-  mixins: [QueryParamService, TaskService, UtilService],
+  mixins: [QueryParamService, TaskService, UtilService, ModuleTask],
   computed: {
-    ...mapState(["instanceName", "instanceLabel", "core"]),
+    ...mapState(["instanceName", "instanceLabel", "core", "configWarnings"]),
+    sinkModeOn() {
+      return this.configWarnings.some((w) => w.id === "sink_mode_enabled");
+    },
   },
   created() {
     const core = window.parent.core;
@@ -39,6 +55,8 @@ export default {
     this.setInstanceNameInStore(instanceName);
     this.getInstanceLabel();
     this.setAppName();
+    // Fills the warnings of the store (sink mode banner)
+    this.runModuleTask("get-configuration").catch(() => {});
 
     // listen to change route events
     const context = this;
@@ -122,4 +140,7 @@ export default {
 
 <style lang="scss">
 @import "styles/carbon-utils";
+.app-banner {
+  padding-top: $spacing-05;
+}
 </style>

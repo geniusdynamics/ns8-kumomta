@@ -16,10 +16,17 @@ its administration interface.
 - optional upstream smarthost with authentication
 - traffic shaping per destination, over the KumoMTA default rules
 - optional webhook of the delivery log records
-- optional **OpenBao / Vault** key sources for the secrets
+- optional **OpenBao / Vault** key sources for the secrets, with a copy
+  back to local storage before turning it off
+- optional **sink mode** for testing: accept and discard all outbound mail
 - live views: queue summary, top destinations, delivery statistics, recent
   bounces and deliveries
 - optional Prometheus metrics route through Traefik, behind authentication
+
+## Documentation
+
+- [docs/sink-mode.md](docs/sink-mode.md): sink mode for testing
+- [docs/openbao.md](docs/openbao.md): OpenBao/Vault secrets, turning OpenBao off
 
 ## Install
 
@@ -70,6 +77,12 @@ Other actions:
 | `list-recent-events` | reader | recent bounces, deferrals, expirations and deliveries from the logs |
 | `list-openbao-servers` | reader | OpenBao instances published in the cluster |
 | `generate-dkim-key` | admin | generate or rotate a DKIM key, or move a local key to OpenBao |
+| `list-openbao-only-secrets` | reader | secrets that exist only in OpenBao, and whether the token reads them (no values) |
+| `copy-openbao-to-local` | admin | copy those secrets to local 0600 files before turning OpenBao off |
+
+`configure-module` returns `{"warnings": [...]}`: `sink_mode_enabled`
+while sink mode is on, `openbao_items_unavailable` (with the item names)
+when OpenBao is turned off while secrets exist only there.
 
 ## Design
 
@@ -98,8 +111,19 @@ NS8 mail module of the node uses (ns8-mail, ns8-mailcow, ns8-postal,
 another kumomta), or that another service holds. The enabled ports are
 opened with `add-public-service` (`node:fwadm`).
 
-Port 465 (implicit TLS) is not offered: the `ImplicitTls` listener mode
-exists only in KumoMTA development builds after the pinned release.
+Port 465 (implicit TLS, SMTPS) is not offered yet. KumoMTA added it on
+2026-10-16 (commit `7ac08291`, "smtp_server: Add implicit TLS listener
+mode", issues #199 and #200): `kumo.start_esmtp_listener` takes
+`tls_mode = 'ImplicitTls'` (and `kumo.make_egress_path` the same option for
+outbound SMTPS). The reference pages carry `since('dev')` and the entry is
+in `docs/changelog/main.md`, the unreleased changelog: the newest stable
+release, `2026.09.29-b90d8bc1`, predates it, and ghcr.io has no newer dated
+tag, only the floating `main`/`dev`/`latest` and per-commit `sha-*`
+images. The module does not run development builds, so the Settings page
+shows the 465 listener as a disabled option until a stable release brings
+`tls_mode`; then the listener needs the pin upgrade, a third optional
+listener in `INIT.listeners` with `tls_mode`, its firewall port and the
+same port conflict check as 25 and 587.
 
 ### Configuration and reload
 
@@ -158,6 +182,14 @@ volume. With OpenBao off, the same secrets are local 0600 files. The
 module's own credentials (HTTP API, SMTP AUTH hashes, metrics password)
 stay local: the module must keep working when OpenBao is unreachable.
 
+Turning OpenBao off leaves the secrets that exist only in OpenBao behind:
+`list-openbao-only-secrets` (reader, names and paths only) lists them, and
+the UI shows them in a warning before saving. It offers to copy them back
+to local 0600 files first with `copy-openbao-to-local`, when the token can
+still read them, or to turn OpenBao off anyway. `configure-module` returns
+an `openbao_items_unavailable` warning with the same list. See
+[docs/openbao.md](docs/openbao.md).
+
 [geniusdynamics/ns8-openbao](https://github.com/geniusdynamics/ns8-openbao)
 publishes `module/<id>/srv/http/openbao` when its cluster network API is
 enabled: the UI lists those instances and offers the first one as default,
@@ -173,6 +205,25 @@ node and trusts the cluster network for relaying. This works only with the
 inbound listener on port 25; in outbound-only mode or on another port the
 key is removed, since the core would configure a port nobody listens on.
 Other applications can use the same address, or a submission user.
+
+The cluster relay is on by default. The "Offer as smarthost to the
+cluster" toggle of the Settings page (`"cluster_relay": false`) turns it
+off: the cluster network leaves `relay_hosts.toml` and the
+`srv/tcp/submission` key is deleted, so `cluster/get-smarthost` no longer
+lists the module and unauthenticated mail from the cluster addresses can
+only reach the inbound domains.
+
+### Sink mode (testing)
+
+`"sink_enabled": true` (Settings, "Sink mode (testing)", off by default)
+makes KumoMTA accept every message and discard it instead of delivering
+it, like the KumoMTA
+[smart-sink example](https://github.com/KumoCorp/kumomta/tree/main/examples/smart-sink-docker):
+every scheduled queue gets a `custom_lua` delivery protocol that logs a
+`Delivery` record. A recipient local part containing `tempfail` or
+`permfail` simulates a deferral or a bounce. While it is on, the UI shows
+a warning banner on every page and `get-configuration` returns a
+`sink_mode_enabled` warning. See [docs/sink-mode.md](docs/sink-mode.md).
 
 ### Live views
 

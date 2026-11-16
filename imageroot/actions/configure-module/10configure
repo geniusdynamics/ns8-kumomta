@@ -16,6 +16,7 @@ import agent
 import kumomta_ns8 as kumo
 
 data = json.load(sys.stdin)
+lock = kumo.settings_lock() # the API daemon also changes the domains
 current = kumo.load_settings()
 settings = dict(current)
 settings.update({k: v for k, v in data.items() if k in kumo.DEFAULTS and not k.endswith("_set")})
@@ -25,10 +26,32 @@ settings["hostname"] = settings["hostname"].lower()
 settings["relay_networks"] = [kumo.normalize_network(n) for n in settings["relay_networks"]]
 settings["metrics_allowlist"] = [kumo.normalize_network(n) for n in settings["metrics_allowlist"]]
 settings["metrics_host"] = settings["metrics_host"].lower()
-settings["domains"] = sorted([{
-    "domain": d["domain"].lower(),
-    "selector": d.get("selector") or "kumo1",
-} for d in settings["domains"]], key=lambda d: d["domain"])
+# The input domains replace the domains of the administrator; the domains
+# of the integrations (owner set, managed through the API) stay. The DNS
+# status of an unchanged domain is kept.
+known = {d["domain"]: d for d in current["domains"]}
+if "domains" in data:
+    admin = []
+    for d in data["domains"]:
+        entry = {"domain": d["domain"].lower(), "selector": d.get("selector") or "kumo1", "owner": "",
+                 "tenant": d.get("tenant") or "", "status": "pending", "last_checked": "", "checks": []}
+        old = known.get(entry["domain"])
+        if old and not old.get("owner") and old["selector"] == entry["selector"]:
+            for key in ("status", "last_checked", "checks"):
+                entry[key] = old.get(key, entry[key])
+        admin.append(entry)
+    settings["domains"] = admin + [d for d in current["domains"] if d.get("owner")]
+normalized = []
+for d in settings["domains"]:
+    entry = {"owner": "", "tenant": "", "status": "pending", "last_checked": "", "checks": []}
+    entry.update(d)
+    entry["domain"] = d["domain"].lower()
+    entry["selector"] = d.get("selector") or "kumo1"
+    normalized.append(entry)
+settings["domains"] = sorted(normalized, key=lambda d: d["domain"])
+settings["api_host"] = settings["api_host"].lower()
+settings["api_allowlist"] = [kumo.normalize_network(n) for n in settings["api_allowlist"]]
+settings["bounce_domain"] = settings["bounce_domain"].lower().rstrip(".")
 settings["inbound_routes"] = sorted([{
     "domain": r["domain"].lower(),
     "host": r["host"],
@@ -73,6 +96,10 @@ else:
     kumo.remove_openbao_env()
 
 
+LOCAL_NAMES = {"smarthost": "smarthost_password", "webhook": "webhook_token",
+               "webhook_signing": "webhook_signing_secret"}
+
+
 def store_secret(name, field, value):
     """Local 0600 file, or a KV v2 secret when OpenBao is enabled"""
     if settings["vault_enabled"]:
@@ -81,9 +108,9 @@ def store_secret(name, field, value):
         except RuntimeError as ex:
             print(agent.SD_ERR + str(ex), file=sys.stderr)
             validation_failed(field, "openbao_write_failed")
-        kumo.remove_secret(f"{name}_password" if name == "smarthost" else f"{name}_token")
+        kumo.remove_secret(LOCAL_NAMES[name])
     else:
-        kumo.write_secret(f"{name}_password" if name == "smarthost" else f"{name}_token", value)
+        kumo.write_secret(LOCAL_NAMES[name], value)
 
 
 if data.get("smarthost_password"):
@@ -100,6 +127,15 @@ elif data.get("webhook_token"):
     settings["webhook_token_set"] = True
 elif not settings["vault_enabled"]:
     settings["webhook_token_set"] = bool(kumo.read_secret("webhook_token"))
+
+if data.get("webhook_signing_secret_clear"):
+    kumo.remove_secret("webhook_signing_secret")
+    settings["webhook_signing_secret_set"] = False
+elif data.get("webhook_signing_secret"):
+    store_secret("webhook_signing", "webhook_signing_secret", data["webhook_signing_secret"])
+    settings["webhook_signing_secret_set"] = True
+elif not settings["vault_enabled"]:
+    settings["webhook_signing_secret_set"] = bool(kumo.read_secret("webhook_signing_secret"))
 
 # The metrics password is checked by kumod itself: always a local file
 if data.get("metrics_password"):
@@ -123,6 +159,29 @@ if "smtp_users" in data:
     settings["smtp_users"] = sorted(users)
 elif not os.path.exists(os.path.join(kumo.SECRETS_DIR, "smtp_users.toml")):
     kumo.write_smtp_users({})
+
+# Integration credentials of the sending platforms: salted SHA-256, the
+# list replaces the current one. Always local: kumod checks them itself.
+hashes = kumo.read_integrations_secrets()
+if "integrations" in data:
+    new_hashes, integrations = {}, []
+    for integ in data["integrations"]:
+        name = integ["name"]
+        if integ.get("password"):
+            salt, digest = kumo.hash_password(integ["password"])
+            new_hashes[name] = {"salt": salt, "sha256": digest}
+        elif name in hashes:
+            new_hashes[name] = hashes[name]
+        integrations.append({
+            "name": name,
+            "tenant": integ.get("tenant") or "",
+            "scopes": [sc for sc in kumo.INTEGRATION_SCOPES if sc in (integ.get("scopes") or [])],
+            "max_message_rate": integ.get("max_message_rate") or "",
+        })
+    hashes = new_hashes
+    settings["integrations"] = sorted(integrations, key=lambda i: i["name"])
+if kumo.write_integrations(settings, hashes):
+    open(".reload-required", "w").close()
 
 # DKIM keys of the sending domains. Local mode: generate the missing keys.
 # OpenBao mode: keys are written to OpenBao by generate-dkim-key, so that

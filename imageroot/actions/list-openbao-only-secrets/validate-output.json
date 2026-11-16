@@ -14,7 +14,7 @@
                 "type": "object",
                 "required": ["kind", "name", "path", "readable"],
                 "properties": {
-                    "kind": {"type": "string", "enum": ["dkim_key", "smarthost_password", "webhook_token"]},
+                    "kind": {"type": "string", "enum": ["dkim_key", "smarthost_password", "webhook_token", "webhook_signing_secret"]},
                     "name": {"type": "string"},
                     "domain": {"type": "string"},
                     "selector": {"type": "string"},

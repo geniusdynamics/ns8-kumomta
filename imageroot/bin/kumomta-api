@@ -1,0 +1,213 @@
+#!/usr/bin/env python3
+
+#
+# Copyright (C) 2026 Genius Dynamics
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+
+# Sending domain management API of the integrations (kumomta-api.service).
+# Listens on 127.0.0.1, second TCP port of the module; Traefik routes /api/v1
+# of the API host name here, over HTTPS. Every request needs the HTTP basic
+# credentials of an integration with the "domains" scope; an integration
+# sees and changes only the domains it added. See docs/api.md.
+#
+#   GET    /api/v1/whoami
+#   GET    /api/v1/domains
+#   POST   /api/v1/domains                    {"domain", "selector", "tenant", "dkim_private_key"}
+#   GET    /api/v1/domains/<domain>
+#   POST   /api/v1/domains/<domain>/validate
+#   DELETE /api/v1/domains/<domain>
+
+import base64
+import json
+import os
+import sys
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+import kumomta_ns8 as kumo
+
+MAX_BODY = 64 * 1024
+RATE = 120            # requests per minute and integration
+FAIL_LIMIT = 20       # failed authentications per minute and user name
+
+_buckets = {}
+_failures = {}
+_lock = threading.Lock()
+
+
+def _allow(table, key, limit, cost=1):
+    """Sliding one-minute window counter: False when over the limit"""
+    now = time.monotonic()
+    with _lock:
+        events = [t for t in table.get(key, []) if now - t < 60]
+        if len(events) + cost > limit:
+            table[key] = events
+            return False
+        events.extend([now] * cost)
+        table[key] = events
+        return True
+
+
+def _over(table, key, limit):
+    now = time.monotonic()
+    with _lock:
+        return len([t for t in table.get(key, []) if now - t < 60]) >= limit
+
+
+class Handler(BaseHTTPRequestHandler):
+    server_version = "ns8-kumomta-api"
+    sys_version = ""
+
+    def log_message(self, fmt, *args):
+        print("%s %s" % (self.headers.get("X-Forwarded-For", self.client_address[0]), fmt % args),
+              file=sys.stderr)
+
+    def reply(self, code, body):
+        data = json.dumps(body).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        if code == 401:
+            self.send_header("WWW-Authenticate", 'Basic realm="kumomta"')
+        self.end_headers()
+        self.wfile.write(data)
+
+    def error(self, code, error, detail=""):
+        self.reply(code, {"error": error, "detail": detail})
+
+    def authenticate(self):
+        """The integration dict, or None after an error reply"""
+        header = self.headers.get("Authorization", "")
+        name = password = ""
+        if header.startswith("Basic "):
+            try:
+                name, _, password = base64.b64decode(header[6:]).decode().partition(":")
+            except Exception:
+                pass
+        if not name or _over(_failures, name, FAIL_LIMIT):
+            if name:
+                self.error(429, "too_many_failures", "too many failed authentications, retry later")
+            else:
+                self.error(401, "unauthorized")
+            return None
+        settings = kumo.load_settings()
+        integ = next((i for i in settings["integrations"] if i["name"] == name), None)
+        if not integ or not kumo.check_integration_password(name, password):
+            _allow(_failures, name, 10 ** 6)
+            self.error(401, "unauthorized")
+            return None
+        if "domains" not in (integ.get("scopes") or []):
+            self.error(403, "forbidden", "the credential has no 'domains' scope")
+            return None
+        if not _allow(_buckets, name, RATE):
+            self.error(429, "rate_limited", f"more than {RATE} requests per minute")
+            return None
+        return integ
+
+    def body(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        if length > MAX_BODY:
+            raise ValueError("body too large")
+        raw = self.rfile.read(length) if length else b"{}"
+        data = json.loads(raw or b"{}")
+        if not isinstance(data, dict):
+            raise ValueError("a JSON object is expected")
+        return data
+
+    def route(self):
+        path = self.path.split("?", 1)[0].rstrip("/")
+        parts = path.split("/")[1:]   # api, v1, ...
+        if parts[:2] != ["api", "v1"]:
+            return None
+        return parts[2:]
+
+    def handle_any(self, method):
+        parts = self.route()
+        if parts is None:
+            self.error(404, "not_found")
+            return
+        integ = self.authenticate()
+        if integ is None:
+            return
+        name = integ["name"]
+        try:
+            if parts == ["whoami"] and method == "GET":
+                self.reply(200, {"name": name, "tenant": integ.get("tenant") or "",
+                                 "scopes": integ.get("scopes") or [],
+                                 "max_message_rate": integ.get("max_message_rate") or ""})
+            elif parts == ["domains"] and method == "GET":
+                settings = kumo.load_settings()
+                self.reply(200, {"domains": [kumo.domain_view(settings, d) for d in settings["domains"]
+                                             if (d.get("owner") or "") == name],
+                                 "require_verified_domains": bool(settings["require_verified_domains"])})
+            elif parts == ["domains"] and method == "POST":
+                data = self.body()
+                tenant = data.get("tenant") or integ.get("tenant") or ""
+                if integ.get("tenant") and tenant != integ["tenant"]:
+                    self.error(422, "invalid_tenant", "the credential is bound to its own tenant")
+                    return
+                with kumo.settings_lock():
+                    settings = kumo.load_settings()
+                    entry = kumo.add_domain(settings, str(data.get("domain") or ""), str(data.get("selector") or ""),
+                                            name, str(tenant), data.get("dkim_private_key") or None)
+                    kumo.save_settings(settings)
+                    kumo.apply_policy()
+                self.reply(201, kumo.domain_view(settings, entry))
+            elif len(parts) in (2, 3) and parts[0] == "domains":
+                settings = kumo.load_settings()
+                dom = kumo.find_domain(settings, parts[1])
+                if not dom or (dom.get("owner") or "") != name:
+                    self.error(404, "domain_not_found", parts[1])
+                elif len(parts) == 2 and method == "GET":
+                    self.reply(200, kumo.domain_view(settings, dom))
+                elif len(parts) == 2 and method == "DELETE":
+                    with kumo.settings_lock():
+                        settings = kumo.load_settings()
+                        kumo.remove_domain(settings, parts[1], owner=name)
+                        kumo.save_settings(settings)
+                        kumo.apply_policy()
+                    self.reply(200, {"domain": dom["domain"], "removed": True})
+                elif len(parts) == 3 and parts[2] == "validate" and method == "POST":
+                    views = kumo.validate_domains([dom["domain"]], owner=name)
+                    self.reply(200, views[0] if views else {})
+                else:
+                    self.error(405, "method_not_allowed")
+            else:
+                self.error(404, "not_found")
+        except kumo.DomainError as ex:
+            code = 409 if ex.code == "domain_exists" else 404 if ex.code == "domain_not_found" else 422
+            self.error(code, ex.code, ex.value)
+        except (ValueError, UnicodeDecodeError) as ex:
+            self.error(400, "bad_request", str(ex))
+        except Exception as ex:
+            print(f"Request failed: {ex!r}", file=sys.stderr)
+            self.error(500, "internal_error")
+
+    def do_GET(self):
+        self.handle_any("GET")
+
+    def do_POST(self):
+        self.handle_any("POST")
+
+    def do_DELETE(self):
+        self.handle_any("DELETE")
+
+
+def main():
+    port = kumo.daemon_port()
+    if not port:
+        print("No second TCP port (TCP_PORTS): the domain API is not available", file=sys.stderr)
+        # Nothing to serve: stay idle instead of a restart loop
+        while True:
+            time.sleep(3600)
+    server = ThreadingHTTPServer(("127.0.0.1", int(port)), Handler)
+    server.daemon_threads = True
+    print(f"Listening on 127.0.0.1:{port}", file=sys.stderr)
+    server.serve_forever()
+
+
+if __name__ == "__main__":
+    main()

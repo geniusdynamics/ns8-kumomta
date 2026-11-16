@@ -197,6 +197,28 @@
               :disabled="busy"
               class="mg-bottom"
             />
+            <NsTextInput
+              type="password"
+              autocomplete="new-password"
+              :label="$t('delivery.webhook_signing_secret')"
+              v-model="webhook_signing_secret"
+              :placeholder="
+                webhook_signing_secret_set ? $t('common.unchanged') : ''
+              "
+              :helper-text="$t('delivery.webhook_signing_secret_helper')"
+              :invalid-message="error.webhook_signing_secret"
+              :disabled="busy"
+              ref="webhook_signing_secret"
+              class="mg-bottom maxwidth"
+            />
+            <NsCheckbox
+              v-if="webhook_signing_secret_set"
+              :label="$t('delivery.webhook_signing_secret_clear')"
+              v-model="webhook_signing_secret_clear"
+              value="clearSigning"
+              :disabled="busy"
+              class="mg-bottom"
+            />
             <div class="label">{{ $t("delivery.webhook_record_types") }}</div>
             <div class="checkboxes mg-bottom">
               <NsCheckbox
@@ -276,6 +298,9 @@ export default {
       webhook_token: "",
       webhook_token_set: false,
       webhook_token_clear: false,
+      webhook_signing_secret: "",
+      webhook_signing_secret_set: false,
+      webhook_signing_secret_clear: false,
       webhook_record_types: [],
       recordTypes: [
         "Reception",
@@ -296,6 +321,7 @@ export default {
         smarthost_password: "",
         webhook_url: "",
         webhook_token: "",
+        webhook_signing_secret: "",
         shaping: "",
       },
     };
@@ -344,6 +370,8 @@ export default {
         this.webhook_url = c.webhook_url;
         this.webhook_token_set = c.webhook_token_set;
         this.webhook_token_clear = false;
+        this.webhook_signing_secret_set = c.webhook_signing_secret_set;
+        this.webhook_signing_secret_clear = false;
         this.webhook_record_types = c.webhook_record_types;
       } catch (failure) {
         this.error.getConfiguration = this.taskErrorMessage(failure);
@@ -394,6 +422,12 @@ export default {
       if (this.webhook_token) {
         data.webhook_token = this.webhook_token;
       }
+      if (this.webhook_signing_secret) {
+        data.webhook_signing_secret = this.webhook_signing_secret;
+      }
+      if (this.webhook_signing_secret_clear) {
+        data.webhook_signing_secret_clear = true;
+      }
       if (this.webhook_token_clear) {
         data.webhook_token_clear = true;
       }
@@ -405,6 +439,7 @@ export default {
         });
         this.smarthost_password = "";
         this.webhook_token = "";
+        this.webhook_signing_secret = "";
         this.getConfiguration();
       } catch (failure) {
         this.error.configureModule = this.taskErrorMessage(failure);

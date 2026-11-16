@@ -11,6 +11,7 @@
 
 import json
 import os
+import re
 import subprocess
 import sys
 import agent
@@ -179,6 +180,61 @@ if settings["metrics_host"]:
             kumo.normalize_network(net)
         except ValueError:
             error("metrics_allowlist", net, "invalid_network")
+
+# Sending domains of the administrator cannot take a domain of an integration
+api_domains = {d["domain"] for d in current["domains"] if d.get("owner")}
+for dom in data.get("domains", []):
+    if dom["domain"].lower() in api_domains:
+        error("domains", dom["domain"], "domain_exists")
+    if not kumo.TENANT_RE.match(dom.get("tenant") or ""):
+        error("domains", dom.get("tenant"), "invalid_tenant")
+
+# Integration credentials of the sending platforms
+known_integrations = kumo.read_integrations_secrets()
+smtp_names = set(names) if "smtp_users" in data else set(known)
+seen = []
+for integ in data.get("integrations", []):
+    name = integ["name"]
+    if not kumo.INTEGRATION_RE.match(name) or name in kumo.RESERVED_NAMES:
+        error("integrations", name, "invalid_integration_name")
+    if name in seen:
+        error("integrations", name, "duplicate_integration")
+    seen.append(name)
+    if name in smtp_names:
+        error("integrations", name, "name_used_by_smtp_user")
+    if not integ.get("password") and name not in known_integrations:
+        error("integrations", name, "password_required")
+    elif integ.get("password") and len(integ["password"]) < 16:
+        error("integrations", name, "integration_password_too_short")
+    if not integ.get("scopes"):
+        error("integrations", name, "scope_required")
+    if not kumo.TENANT_RE.match(integ.get("tenant") or ""):
+        error("integrations", integ.get("tenant"), "invalid_tenant")
+    if integ.get("max_message_rate") and not kumo.RATE_RE.match(integ["max_message_rate"]):
+        error("integrations", integ["max_message_rate"], "invalid_rate")
+
+# HTTPS API of the sending platforms (Traefik routes)
+if settings["api_host"]:
+    ahost = settings["api_host"].lower()
+    if not kumo.HOSTNAME_RE.match(ahost):
+        error("api_host", settings["api_host"], "invalid_hostname")
+    elif ahost != (current["api_host"] or "").lower() and (
+            agent.http_route_in_use(domain=ahost, path="/api/inject")
+            or agent.http_route_in_use(domain=ahost, path="/api/v1")):
+        error("api_host", settings["api_host"], "domain_already_used_in_traefik")
+    if not os.environ.get("TCP_PORTS", "").count(","):
+        error("api_host", settings["api_host"], "api_port_missing")
+for net in settings["api_allowlist"]:
+    try:
+        kumo.normalize_network(net)
+    except ValueError:
+        error("api_allowlist", net, "invalid_network")
+if settings["spf_include"] and not re.match(r"^[a-z0-9]+(:[A-Za-z0-9._:/-]+)?$", settings["spf_include"]):
+    error("spf_include", settings["spf_include"], "invalid_spf_mechanism")
+if settings["bounce_domain"] and not kumo.HOSTNAME_RE.match(settings["bounce_domain"].lower().rstrip(".")):
+    error("bounce_domain", settings["bounce_domain"], "invalid_hostname")
+if data.get("webhook_signing_secret") and len(data["webhook_signing_secret"]) < 16:
+    error("webhook_signing_secret", "", "password_too_short")
 
 if errors:
     agent.set_status('validation-failed')

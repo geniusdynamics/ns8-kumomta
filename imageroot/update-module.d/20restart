@@ -11,8 +11,8 @@ set -e
 exec 1>&2
 
 systemctl --user daemon-reload
-systemctl --user try-restart kumomta.service
+systemctl --user try-restart kumomta.service kumomta-api.service
 if systemctl --user -q is-enabled kumomta.service; then
-    systemctl --user enable --now kumomta-logs-cleanup.timer
+    systemctl --user enable --now kumomta-logs-cleanup.timer kumomta-api.service
 fi
 rm -f .restart-required .reload-required

@@ -531,6 +531,15 @@
                     "items": {
                         "type": "string"
                     }
+                },
+                "tsa_hosts": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "tsa_reachable": {
+                    "type": "integer"
                 }
             }
         },
@@ -549,6 +558,25 @@
                 "type": "object",
                 "required": [
                     "module_id"
+                ]
+            }
+        },
+        "sending_ips": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": [
+                    "address"
+                ]
+            }
+        },
+        "provider_presets": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": [
+                    "provider",
+                    "label"
                 ]
             }
         }

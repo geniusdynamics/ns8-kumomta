@@ -130,8 +130,13 @@ DEFAULTS = {
     "cluster_redis_nodes": [],        # manual: redis:// or rediss:// URLs, no password
     "cluster_redis_username": "",
     "cluster_redis_cluster": False,   # manual: Redis Cluster protocol with one URL
-    # Traffic shaping automation daemon (tsa-daemon) of this instance
+    # Traffic shaping automation daemon (tsa-daemon) of this instance; in a
+    # cluster: this instance is a designated TSA host
     "tsa_enabled": False,
+    # Sending IPs (egress sources of the default pool) with their limits,
+    # see SENDING_IP_FIELDS. Empty: the address of the default route, no
+    # per-IP limits (as before)
+    "sending_ips": [],
     # Non-secret markers of the write-only secrets
     "smarthost_password_set": False,
     "webhook_token_set": False,
@@ -144,6 +149,18 @@ DEFAULTS = {
 # OpenBao, never returned
 SECRET_FIELDS = ["smarthost_password", "webhook_token", "vault_token", "metrics_password",
                  "webhook_signing_secret", "cluster_redis_password"]
+
+# Destination providers of the per-IP overrides: the provider blocks of the
+# KumoMTA default shaping.toml (policy-extras), matched by their MX names
+PROVIDER_PRESETS = {
+    "google": "Gmail and Google Workspace",
+    "outlook": "Outlook.com and Hotmail",
+    "office365": "Microsoft 365",
+    "yahoo": "Yahoo and AOL",
+    "apple": "iCloud",
+}
+LIMIT_FIELDS = ["per_minute", "per_hour", "per_day", "max_connections"]
+PERIODS = {"per_minute": "min", "per_hour": "h", "per_day": "d"}
 
 RATE_RE = re.compile(r"^[0-9]+/(s|sec|second|m|min|minute|h|hr|hour|d|day)$")
 DURATION_RE = re.compile(r"^[0-9]+ ?(s|sec|secs|seconds|m|min|mins|minutes|h|hr|hrs|hours|d|day|days|w|week|weeks)$")
@@ -654,10 +671,33 @@ class DomainError(Exception):
         self.value = value
 
 
+def read_shared_dkim_key(settings, domain, selector):
+    """The private key at the OpenBao path of a domain, or None when there
+    is none. Raises RuntimeError when OpenBao cannot answer."""
+    try:
+        return openbao_read(settings, dkim_vault_path(settings, domain, selector))
+    except RuntimeError as ex:
+        if "answered 404" in str(ex) or "no '" in str(ex):
+            return None
+        raise
+
+
 def install_dkim_key(settings, domain, selector, pem=None):
     """Store a DKIM private key (new one unless pem is given) in OpenBao
     or a local 0600 file, and its public key. Return the key location.
-    Raises RuntimeError (OpenBao) or DomainError (invalid pem)"""
+    Clustered with OpenBao, the path is shared by the peers: an existing key
+    there is used, never replaced (DomainError shared_key_exists when another
+    key is given). Raises RuntimeError (OpenBao) or DomainError (invalid pem)"""
+    if clustered(settings) and settings["vault_enabled"]:
+        shared = read_shared_dkim_key(settings, domain, selector)
+        if shared is not None:
+            if pem is not None and public_from_private(pem) != public_from_private(shared):
+                raise DomainError("shared_key_exists", domain)
+            keyfile, _ = dkim_paths(domain, selector)
+            if os.path.exists(keyfile):
+                os.unlink(keyfile)
+            store_dkim_public(domain, selector, public_from_private(shared))
+            return "openbao"
     if pem is None:
         pem, public = generate_dkim_key()
     else:
@@ -1182,6 +1222,29 @@ def store_ping(store, password, timeout=3.0):
     return False, err
 
 
+def tsa_reachable(urls, timeout=2.0):
+    """Number of tsa-daemon URLs that accept a TCP connection"""
+    import socket
+    count = 0
+    for url in urls:
+        host, _, port = url.split("//", 1)[-1].rpartition(":")
+        try:
+            with socket.create_connection((host.strip("[]"), int(port)), timeout=timeout):
+                count += 1
+        except (OSError, ValueError):
+            pass
+    return count
+
+
+def designated_tsa_hosts(identity):
+    """{module_id: url} of the designated TSA hosts of a store (records)"""
+    hosts = {}
+    for module_id, rec in service_records(CLUSTER_SERVICE).items():
+        if rec.get("store") == identity and _truthy(rec.get("tsa", "")) and rec.get("host") and rec.get("port"):
+            hosts[module_id] = f"http://{rec['host']}:{int(rec['port'])}"
+    return hosts
+
+
 def tsa_peers(settings, identity):
     """TSA URLs of the other peers with the same store"""
     urls = []
@@ -1207,7 +1270,8 @@ def _cluster_local(state, previous, reason, immediate):
             and failures < CLUSTER_FAILURES_BEFORE_LOCAL):
         kept = dict(previous)
         kept.update({"failures": failures, "tsa_listen": state["tsa_listen"],
-                     "tsa_publish": state["tsa_publish"], "tsa_subscribe": state["tsa_subscribe"]})
+                     "tsa_publish": state["tsa_publish"], "tsa_subscribe": state["tsa_subscribe"],
+                     "tsa_reachable": state.get("tsa_reachable", 0)})
         return kept
     state.update({"mode": "local", "reason": reason, "redis": None, "failures": failures})
     return state
@@ -1238,9 +1302,13 @@ def evaluate_cluster(settings, fetch=True, immediate=False):
     if settings["tsa_enabled"] and port and address:
         own = f"http://{address}:{port}"
         state["tsa_listen"] = f"{address}:{port}"
+    # kumod publishes to the designated TSA hosts only, and subscribes to
+    # its own daemon (or to one of them): peers without TSA joining or
+    # leaving leave these lists, and kumod, untouched
     peers = tsa_peers(settings, identity)
     state["tsa_publish"] = ([own] if own else []) + peers
     state["tsa_subscribe"] = [own] if own else peers[:1]
+    state["tsa_reachable"] = tsa_reachable(state["tsa_publish"]) if peers else int(bool(own))
     if not address and settings["cluster_store"] == "valkey":
         # ns8-valkey is reached through the cluster VPN
         return _cluster_local(state, previous, "no_cluster_address", True)
@@ -1270,14 +1338,21 @@ def cluster_warnings(settings, state=None):
     """Warning shown on every page while a clustered instance uses local
     throttles"""
     state = read_cluster_state() if state is None else state
-    if not clustered(settings) or state.get("mode") != "local":
+    if not clustered(settings):
         return []
+    warnings = []
+    if state.get("tsa_publish") and not state.get("tsa_reachable", 1):
+        warnings.append({"id": "tsa_unreachable", "reason": "tsa_unreachable",
+                         "message": "No designated TSA host answers: traffic shaping automation is paused "
+                                    "(shaping limits still apply)"})
+    if state.get("mode") != "local":
+        return warnings
     reason = state.get("reason") or "store_unreachable"
     store = state.get("store_label") or settings.get("cluster_valkey") or "?"
     detail = CLUSTER_REASONS.get(reason, reason).format(store=store)
     return [{"id": "cluster_degraded", "reason": reason,
              "message": f"Cluster degraded: {detail}. Throttles and connection limits are local "
-                        "to this instance until the store answers again; mail is still sent"}]
+                        "to this instance until the store answers again; mail is still sent"}] + warnings
 
 
 def cluster_record(settings, state):
@@ -1416,6 +1491,83 @@ def cluster_check(prestart=False, immediate=False):
             except Exception as ex:
                 log(agent.SD_WARNING + f"Configuration epoch bump failed: {ex}")
     return state
+
+
+# --------------------------------------------------------------------------
+# Sending IPs and their limits (docs/sending-ips.md). Native KumoMTA
+# mechanisms only: one egress source per IP in the default pool; overall
+# per-IP limits are named additional_message_rate_throttles and
+# additional_connection_limits added in get_egress_path_config; per-IP
+# per-provider limits are provider/domain source blocks of shaping.toml with
+# the same named limits. Named limits live in the shared store when
+# clustered, so they hold per IP across the nodes.
+# --------------------------------------------------------------------------
+
+def source_name(settings, address):
+    """Egress source of a sending IP. The default route keeps the name
+    "default" on a standalone instance (unchanged queues); in a cluster it
+    is named after the node, so that its limits are per IP, not global."""
+    if address:
+        return "ip-" + re.sub(r"[^0-9A-Za-z]", "-", address)
+    if clustered(settings):
+        return f"node-{os.environ.get('NODE_ID', '0')}"
+    return "default"
+
+
+def limit_specs(entry, key):
+    """({limit name: throttle spec}, {limit name: connections}) of a limits
+    entry, the names starting with key"""
+    rates, conns = {}, {}
+    for field, period in PERIODS.items():
+        if int(entry.get(field) or 0) > 0:
+            rates[f"{key}-{period}"] = f"{int(entry[field])}/{period}"
+    if int(entry.get("max_connections") or 0) > 0:
+        conns[f"{key}-conn"] = int(entry["max_connections"])
+    return rates, conns
+
+
+def provider_block_name(rule):
+    """The provider block of KumoMTA (a preset), or ns8-mx-<suffix> and
+    ns8-domain-<domain> for the custom ones"""
+    if rule["provider"] in PROVIDER_PRESETS:
+        return rule["provider"]
+    slug = re.sub(r"[^0-9a-z]", "-", rule["match"].lower().strip("."))
+    return f"ns8-{rule['provider']}-{slug}"
+
+
+def sending_ip_files(settings):
+    """(sources, ip_limits, provider blocks, domain blocks) for the policy"""
+    ips = settings["sending_ips"] or [{"address": ""}]
+    sources, pool, overall, providers, domains = {}, {}, {}, {}, {}
+    for ip in ips:
+        name = source_name(settings, ip.get("address") or "")
+        src = {"ehlo_domain": ip.get("ehlo_domain") or settings["hostname"]}
+        if ip.get("address"):
+            src["source_address"] = ip["address"]
+        sources[name] = src
+        pool[name] = {"weight": int(ip.get("weight") or 1)}
+        rates, conns = limit_specs(ip, f"ns8-{name}")
+        if rates or conns:
+            overall[name] = {"rates": rates, "connections": conns}
+        for rule in ip.get("providers") or []:
+            rates, conns = limit_specs(rule, f"ns8-{name}-{provider_block_name(rule)}")
+            block = {}
+            if rates:
+                block["additional_message_rate_throttles"] = rates
+            if conns:
+                block["additional_connection_limits"] = conns
+            if not block:
+                continue
+            if rule["provider"] == "domain":
+                # a destination domain: its own (domain, source) block
+                domains.setdefault(rule["match"].lower(), {"sources": {}})["sources"][name] = block
+                continue
+            pname = provider_block_name(rule)
+            prov = providers.setdefault(pname, {"sources": {}})
+            if rule["provider"] == "mx":
+                prov["match"] = [{"MXSuffix": "." + rule["match"].lower().lstrip(".")}]
+            prov["sources"][name] = block
+    return sources, pool, overall, providers, domains
 
 
 # --------------------------------------------------------------------------
@@ -1559,10 +1711,13 @@ def render(settings, template_path=None):
     files["relay_hosts.toml"] = toml_dumps({"networks": seen}, header=head + "\nClients of these networks relay without SMTP AUTH.")
 
     # Egress sources and pool
+    ip_sources, ip_pool, ip_overall, ip_providers, ip_domains = sending_ip_files(settings)
     files["sources.toml"] = toml_dumps({
-        "source": {"default": {"ehlo_domain": settings["hostname"]}},
-        "pool": {"default": {"default": {"weight": 1}}},
+        "source": ip_sources,
+        "pool": {"default": ip_pool},
     }, header=head)
+    # Overall limits of each sending IP, added by get_egress_path_config
+    files["ip_limits.toml"] = toml_dumps({"source": ip_overall}, header=head + "\nOverall limits of each sending IP (egress source), all destinations together.")
 
     # DKIM signing data (format of policy-extras.dkim_sign, plus vault_key)
     base = {"headers": ["From", "To", "Subject", "Date", "MIME-Version", "Content-Type",
@@ -1621,6 +1776,12 @@ def render(settings, template_path=None):
         if rule.get("max_message_rate"):
             entry["max_message_rate"] = rule["max_message_rate"]
         shaping[rule["domain"]] = entry
+    # Per-IP limits of a destination: provider (and domain) source blocks
+    for dname, block in ip_domains.items():
+        dentry = shaping.setdefault(dname, {"mx_rollup": False})
+        dentry.setdefault("sources", {}).update(block["sources"])
+    if ip_providers:
+        shaping["provider"] = ip_providers
     files["shaping.toml"] = toml_dumps(shaping, header=head + "\nPer-destination limits, over /opt/kumomta/share/policy-extras/shaping.toml.")
 
     # Webhook of the log records

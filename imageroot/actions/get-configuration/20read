@@ -57,7 +57,14 @@ config["cluster_status"] = {
     "tsa_listen": state.get("tsa_listen") or "",
     "tsa_peers": [u for u in (state.get("tsa_publish") or []) if u != "http://" + (state.get("tsa_listen") or "")],
 }
+try:
+    tsa_hosts = sorted(kumo.designated_tsa_hosts(kumo.store_identity(settings))) if kumo.clustered(settings) else []
+except Exception:
+    tsa_hosts = []
+config["cluster_status"]["tsa_hosts"] = tsa_hosts
+config["cluster_status"]["tsa_reachable"] = int(state.get("tsa_reachable") or 0)
 config["tsa_port"] = kumo.tsa_port() or 0
+config["provider_presets"] = [{"provider": k, "label": v} for k, v in kumo.PROVIDER_PRESETS.items()]
 try:
     valkeys = kumo.service_records(kumo.VALKEY_SERVICE)
 except Exception:

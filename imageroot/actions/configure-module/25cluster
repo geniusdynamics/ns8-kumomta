@@ -41,13 +41,30 @@ state = kumo.evaluate_cluster(settings, fetch=True, immediate=True)
 with kumo.settings_lock():
     kumo.write_cluster_state(state)
 
-warnings = kumo.cluster_warnings(settings, state)
-if warnings:
-    print(agent.SD_WARNING + warnings[0]["message"], file=sys.stderr)
+try:
+    with open(kumo.WARNINGS_FILE) as fp:
+        collected = json.load(fp)
+except (FileNotFoundError, ValueError):
+    collected = []
+for warning in kumo.cluster_warnings(settings, state):
+    print(agent.SD_WARNING + warning["message"], file=sys.stderr)
+    collected.append({"id": warning["id"], "items": [warning["reason"]]})
+
+# TSA designation changed: the peers of the store restart kumod once (their
+# list of daemons changes). The last designated host leaving stops the
+# automation of the cluster.
+if kumo.clustered(settings):
     try:
-        with open(kumo.WARNINGS_FILE) as fp:
-            collected = json.load(fp)
-    except (FileNotFoundError, ValueError):
-        collected = []
-    collected.append({"id": "cluster_degraded", "items": [warnings[0]["reason"]]})
-    kumo.write_file(kumo.WARNINGS_FILE, json.dumps(collected), 0o600)
+        hosts = kumo.designated_tsa_hosts(kumo.store_identity(settings))
+    except Exception:
+        hosts = {}
+    others = sorted(h for h in hosts if h != os.environ.get("MODULE_ID"))
+    if os.path.exists(".tsa-designation-changed"):
+        os.unlink(".tsa-designation-changed")
+        peers = sorted(mid for mid, rec in kumo.service_records(kumo.CLUSTER_SERVICE).items()
+                       if rec.get("store") == kumo.store_identity(settings) and mid != os.environ.get("MODULE_ID"))
+        if peers:
+            collected.append({"id": "tsa_peers_restart", "items": peers})
+        if not settings["tsa_enabled"] and not others:
+            collected.append({"id": "tsa_no_host", "items": []})
+kumo.write_file(kumo.WARNINGS_FILE, json.dumps(collected), 0o600)

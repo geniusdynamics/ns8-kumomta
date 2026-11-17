@@ -34,9 +34,12 @@ if data.get("cluster_join"):
                     'error': 'cluster_join_failed'}], fp=sys.stdout)
         sys.exit(3)
     peer = ret["output"]
+    # The store only: whether this instance is a designated TSA host is its
+    # own choice (tsa_enabled of the input, off by default)
     for key in ("cluster_store", "cluster_valkey", "cluster_redis_nodes", "cluster_redis_username",
-                "cluster_redis_cluster", "tsa_enabled"):
+                "cluster_redis_cluster"):
         data[key] = peer[key]
+    data.setdefault("tsa_enabled", False)
     if peer.get("cluster_redis_password"):
         data["cluster_redis_password"] = peer["cluster_redis_password"]
 settings = dict(current)
@@ -81,6 +84,17 @@ settings["inbound_routes"] = sorted([{
 settings["shaping"] = sorted([dict(r, domain=r["domain"].lower()) for r in settings["shaping"]],
                              key=lambda r: r["domain"])
 settings["vault_address"] = settings["vault_address"].rstrip("/")
+settings["sending_ips"] = [{
+    "address": (ip.get("address") or "").strip(),
+    "ehlo_domain": (ip.get("ehlo_domain") or "").lower(),
+    "weight": int(ip.get("weight") or 1),
+    **{f: int(ip.get(f) or 0) for f in kumo.LIMIT_FIELDS},
+    "providers": [{
+        "provider": rule["provider"],
+        "match": (rule.get("match") or "").lower().strip(".") if rule["provider"] in ("domain", "mx") else "",
+        **{f: int(rule.get(f) or 0) for f in kumo.LIMIT_FIELDS},
+    } for rule in (ip.get("providers") or [])],
+} for ip in settings["sending_ips"]]
 
 os.makedirs(kumo.SECRETS_DIR, mode=0o700, exist_ok=True)
 kumo.ensure_api_credentials()
@@ -240,11 +254,19 @@ for dom in settings["domains"]:
             kumo.store_dkim_public(dom["domain"], dom["selector"], kumo.public_from_private(fp.read()))
     if settings["vault_enabled"] or os.path.exists(keyfile) or os.path.exists(pubfile):
         continue
+    if kumo.clustered(settings):
+        # Cluster: every peer signs with the same key; it is generated once
+        # and imported on the other peers (generate-dkim-key), never made up
+        # here
+        continue
     pem, public = kumo.generate_dkim_key()
     kumo.store_dkim_private(dom["domain"], dom["selector"], pem)
     kumo.store_dkim_public(dom["domain"], dom["selector"], public)
     print(f"Generated the DKIM key {dom['selector']} of {dom['domain']}", file=sys.stderr)
 
+if kumo.clustered(settings) and kumo.clustered(current) and settings["tsa_enabled"] != current["tsa_enabled"] \
+        and kumo.store_identity(settings) == kumo.store_identity(current):
+    open(".tsa-designation-changed", "w").close()  # 25cluster warns about it
 kumo.save_settings(settings)
 
 # Non-secret values other modules and the units may read

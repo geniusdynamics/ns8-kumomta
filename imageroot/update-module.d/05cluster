@@ -21,6 +21,6 @@ import agent
 
 try:
     with agent.redis_connect(privileged=True) as prdb:
-        prdb.sadd(f"{os.environ['AGENT_ID']}/roles/clusterpeer", "reveal-cluster-settings")
+        prdb.sadd(f"{os.environ['AGENT_ID']}/roles/clusterpeer", "reveal-cluster-settings", "reveal-dkim-key")
 except Exception as ex:
     print(agent.SD_WARNING + f"Cannot define the clusterpeer role: {ex}", file=sys.stderr)

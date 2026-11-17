@@ -9,9 +9,11 @@
 # refuse the mail ports of another NS8 mail module of the node and the
 # ports held by another service.
 
+import ipaddress
 import json
 import os
 import re
+import socket
 import subprocess
 import sys
 import agent
@@ -235,6 +237,37 @@ if settings["bounce_domain"] and not kumo.HOSTNAME_RE.match(settings["bounce_dom
     error("bounce_domain", settings["bounce_domain"], "invalid_hostname")
 if data.get("webhook_signing_secret") and len(data["webhook_signing_secret"]) < 16:
     error("webhook_signing_secret", "", "password_too_short")
+
+# Sending IPs: local addresses, each once; per-provider overrides
+seen_ips = []
+for ip in data.get("sending_ips", []):
+    address = (ip.get("address") or "").strip()
+    if address in seen_ips:
+        error("sending_ips", address or "default", "duplicate_address")
+    seen_ips.append(address)
+    if address:
+        try:
+            family = socket.AF_INET6 if ipaddress.ip_address(address).version == 6 else socket.AF_INET
+            with socket.socket(family, socket.SOCK_DGRAM) as sock:
+                sock.bind((address, 0))
+        except ValueError:
+            error("sending_ips", address, "invalid_ip_address")
+        except OSError:
+            error("sending_ips", address, "address_not_local")
+    if ip.get("ehlo_domain") and not kumo.HOSTNAME_RE.match(ip["ehlo_domain"].lower()):
+        error("sending_ips", ip["ehlo_domain"], "invalid_hostname")
+    seen_rules = []
+    for rule in ip.get("providers") or []:
+        if rule["provider"] in ("domain", "mx"):
+            match = (rule.get("match") or "").lower().strip(".")
+            if not kumo.DOMAIN_RE.match(match):
+                error("sending_ips", rule.get("match") or "", "invalid_domain")
+            key = (rule["provider"], match)
+        else:
+            key = (rule["provider"], "")
+        if key in seen_rules:
+            error("sending_ips", "/".join(k for k in key if k), "duplicate_provider")
+        seen_rules.append(key)
 
 # Multi-node cluster: shared throttle store and tsa-daemon
 if data.get("cluster_join"):

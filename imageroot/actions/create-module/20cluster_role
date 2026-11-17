@@ -12,4 +12,4 @@
 
 set -e
 exec 1>&2
-redis-exec SADD "${AGENT_ID}/roles/clusterpeer" "reveal-cluster-settings"
+redis-exec SADD "${AGENT_ID}/roles/clusterpeer" "reveal-cluster-settings" "reveal-dkim-key"

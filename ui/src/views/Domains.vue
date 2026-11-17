@@ -128,12 +128,41 @@
                   @click="validateDomain(dom)"
                   >{{ $t("domains.validate") }}</NsButton
                 >
+                <template v-if="clustered && dom.key_location === 'missing'">
+                  <NsButton
+                    v-if="vault_enabled"
+                    kind="tertiary"
+                    size="small"
+                    :icon="Locked20"
+                    :loading="loading.generate === dom.domain"
+                    :disabled="busy || !!loading.generate"
+                    class="mg-right"
+                    @click="installKey(dom, { source: 'shared' })"
+                    >{{ $t("domains.use_shared_key") }}</NsButton
+                  >
+                  <NsButton
+                    kind="tertiary"
+                    size="small"
+                    :icon="Download20"
+                    :disabled="busy || !!loading.generate"
+                    class="mg-right"
+                    @click="openImport(dom)"
+                    >{{ $t("domains.import_key") }}</NsButton
+                  >
+                </template>
                 <NsButton
+                  v-if="!clustered || dom.key_location !== 'openbao'"
                   kind="tertiary"
                   size="small"
                   :icon="Restart20"
                   :loading="loading.generate === dom.domain"
-                  :disabled="busy || !!loading.generate"
+                  :disabled="
+                    busy ||
+                    !!loading.generate ||
+                    (clustered &&
+                      dom.key_location !== 'missing' &&
+                      dom.key_location !== 'local_not_in_openbao')
+                  "
                   @click="generateKey(dom, dom.key_location !== 'missing')"
                   >{{
                     dom.key_location === "missing"
@@ -158,6 +187,17 @@
               kind="error"
               :title="$t('action.validate-domain')"
               :description="error.validate"
+              :showCloseButton="false"
+            />
+            <NsInlineNotification
+              v-if="clustered"
+              kind="info"
+              :title="$t('domains.cluster_keys_title')"
+              :description="
+                vault_enabled
+                  ? $t('domains.cluster_keys_openbao')
+                  : $t('domains.cluster_keys_local')
+              "
               :showCloseButton="false"
             />
             <NsInlineNotification
@@ -243,6 +283,64 @@
         >
       </cv-column>
     </cv-row>
+    <!-- cluster: import the key of a domain (PEM, or from a peer) -->
+    <NsModal
+      size="default"
+      :visible="importModal.visible"
+      :primaryButtonDisabled="
+        loading.generate !== '' ||
+        (importModal.mode === 'peer' ? !importModal.peer : !importModal.pem)
+      "
+      :isLoading="loading.generate !== ''"
+      @modal-hidden="importModal.visible = false"
+      @secondary-click="importModal.visible = false"
+      @primary-click="importKey"
+    >
+      <template slot="title">{{
+        $t("domains.import_title", { domain: importModal.domain })
+      }}</template>
+      <template slot="content">
+        <cv-radio-group vertical class="mg-bottom">
+          <cv-radio-button
+            :label="$t('domains.import_from_peer')"
+            value="peer"
+            v-model="importModal.mode"
+            :disabled="!peers.length"
+          />
+          <cv-radio-button
+            :label="$t('domains.import_pem')"
+            value="import"
+            v-model="importModal.mode"
+          />
+        </cv-radio-group>
+        <NsComboBox
+          v-if="importModal.mode === 'peer'"
+          v-model="importModal.peer"
+          :options="peerOptions"
+          :title="$t('domains.import_peer')"
+          :label="$t('cluster.choose')"
+          :auto-filter="true"
+          :auto-highlight="true"
+          class="mg-bottom"
+        />
+        <cv-text-area
+          v-else
+          :label="$t('domains.import_pem_label')"
+          v-model="importModal.pem"
+          :helper-text="$t('domains.import_pem_helper')"
+          class="mg-bottom"
+        />
+        <NsInlineNotification
+          v-if="error.generate"
+          kind="error"
+          :title="$t('action.generate-dkim-key')"
+          :description="error.generate"
+          :showCloseButton="false"
+        />
+      </template>
+      <template slot="secondary-button">{{ $t("common.cancel") }}</template>
+      <template slot="primary-button">{{ $t("domains.import_key") }}</template>
+    </NsModal>
   </cv-grid>
 </template>
 
@@ -277,6 +375,16 @@ export default {
       domains: [],
       routes: [],
       vault_enabled: false,
+      // cluster: keys are imported from a peer or a PEM, never overwritten
+      clustered: false,
+      peers: [],
+      importModal: {
+        visible: false,
+        domain: "",
+        mode: "peer",
+        peer: "",
+        pem: "",
+      },
       loading: {
         getConfiguration: false,
         configureModule: false,
@@ -299,6 +407,13 @@ export default {
     busy() {
       return this.loading.getConfiguration || this.loading.configureModule;
     },
+    peerOptions() {
+      return this.peers.map((p) => ({
+        name: p.module_id,
+        value: p.module_id,
+        label: `${p.ui_name || p.module_id} (${p.module_id})`,
+      }));
+    },
   },
   created() {
     this.getConfiguration();
@@ -320,6 +435,8 @@ export default {
       try {
         const c = await this.runModuleTask("get-configuration");
         this.vault_enabled = c.vault_enabled;
+        this.clustered = c.cluster_store !== "none";
+        this.peers = (c.cluster_peers || []).filter((p) => p.same_store);
         this.domains = c.domains.map((d) =>
           Object.assign({ key: this.getUuid(), isNew: false }, d)
         );
@@ -432,6 +549,44 @@ export default {
         this.error.validate = this.taskErrorMessage(failure);
       }
       this.loading.remove = "";
+    },
+    openImport(dom) {
+      this.error.generate = "";
+      this.importModal = {
+        visible: true,
+        domain: dom.domain,
+        mode: this.peers.length ? "peer" : "import",
+        peer: this.peers.length ? this.peers[0].module_id : "",
+        pem: "",
+      };
+    },
+    async importKey() {
+      const data =
+        this.importModal.mode === "peer"
+          ? { source: "peer", peer: this.importModal.peer }
+          : { source: "import", private_key: this.importModal.pem };
+      if (await this.installKey({ domain: this.importModal.domain }, data)) {
+        this.importModal.visible = false;
+        this.importModal.pem = "";
+      }
+    },
+    async installKey(dom, data) {
+      this.error.generate = "";
+      this.loading.generate = dom.domain;
+      let ok = false;
+      try {
+        await this.runModuleTask(
+          "generate-dkim-key",
+          Object.assign({ domain: dom.domain }, data),
+          { title: this.$t("action.generate-dkim-key"), hidden: false }
+        );
+        ok = true;
+        this.getConfiguration();
+      } catch (failure) {
+        this.error.generate = this.taskErrorMessage(failure);
+      }
+      this.loading.generate = "";
+      return ok;
     },
     async generateKey(dom, existing) {
       if (

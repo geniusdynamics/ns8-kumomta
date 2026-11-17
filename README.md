@@ -28,6 +28,9 @@ its administration interface.
 - live views: queue summary, top destinations, delivery statistics, recent
   bounces and deliveries
 - optional Prometheus metrics route through Traefik, behind authentication
+- **sending IPs** with overall and per-provider limits per IP (per minute,
+  hour, day, connections), from KumoMTA's egress sources and named
+  throttles
 - optional **multi-node cluster**: shared throttles and connection limits
   in a Valkey or Redis store (ns8-valkey, or your own, Redis Cluster
   included), and the traffic shaping automation daemon (tsa-daemon) fed
@@ -46,7 +49,9 @@ its administration interface.
 - [docs/sink-mode.md](docs/sink-mode.md): sink mode for testing
 - [docs/openbao.md](docs/openbao.md): OpenBao/Vault secrets, turning OpenBao off
 - [docs/cluster.md](docs/cluster.md): multi-node cluster, shared throttle
-  store, traffic shaping automation, failure modes
+  store, traffic shaping automation, DKIM keys, failure modes
+- [docs/sending-ips.md](docs/sending-ips.md): sending IPs, overall and
+  per-provider limits per IP
 
 ## Install
 
@@ -108,6 +113,7 @@ Other actions:
 | `remove-domain` | admin | remove a sending domain and its local key |
 | `list-openbao-only-secrets` | reader | secrets that exist only in OpenBao, and whether the token reads them (no values) |
 | `copy-openbao-to-local` | admin | copy those secrets to local 0600 files before turning OpenBao off |
+| `reveal-dkim-key` | clusterpeer | DKIM key of a domain, for another kumomta instance of the cluster |
 | `reveal-cluster-settings` | clusterpeer | cluster store settings and password, for another kumomta instance joining the cluster |
 
 `configure-module` returns `{"warnings": [...]}`: `cluster_degraded` while

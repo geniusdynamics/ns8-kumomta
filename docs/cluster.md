@@ -181,22 +181,64 @@ its state (`tsa.db`) on the `kumomta-tsa` volume. It loads the same shaping
 files as kumod: the KumoMTA defaults, with the automation rules of the
 large mailbox providers, and the per-domain settings of the module.
 
-- Standalone: it listens on `127.0.0.1:<3rd TCP port>`, and kumod publishes
-  to it and subscribes to it.
-- Clustered: it listens on the cluster VPN address, and its
-  `trusted_hosts` are the loopback and the cluster network. kumod
-  publishes to its own daemon and to the daemon of every peer with the
-  same store (from the peer records), and subscribes to its own daemon
-  (or to one peer daemon when it runs none), as in the KumoMTA "multiple
-  node" deployment. Each daemon computes the same suspensions and overrides
-  from the same records; they do not share state.
+- Standalone (`tsa_enabled`): it listens on `127.0.0.1:<3rd TCP port>`, and
+  kumod publishes to it and subscribes to it.
+- Clustered: `tsa_enabled` makes the instance a **designated TSA host**,
+  chosen when the store is set up or when the instance joins (a join does
+  not copy it: it is off unless checked). Only designated hosts run
+  tsa-daemon, on the cluster VPN address, trusting the cluster network.
+  Every kumod of the store publishes its log records to all the
+  designated hosts (from the peer records) and subscribes to its own
+  daemon, or to one designated host when it is not one, as in the KumoMTA
+  "multiple node" deployment. The daemons compute the same suspensions and
+  overrides from the same records; they do not share state.
 
-The lists of daemons are read by kumod in its `init` event only
-(`configure_log_hook`, the subscriber tasks): a configuration epoch bump
-does not change them. When a peer joins, leaves, or turns its daemon on or
-off, it publishes `kumomta-cluster-changed`; every peer of the same store
-refreshes its list and **restarts kumod** if it changed. Records queued for
+KumoMTA reads the list of daemons in its `init` event only
+(`configure_log_hook` and the subscriber tasks of `setup_publish`): a
+configuration epoch bump does not change it. When a peer joins, leaves or
+changes, it publishes `kumomta-cluster-changed`; each peer of the store
+computes its list again and restarts kumod **only if the list changed**.
+So peers that are not TSA hosts join and leave without restarting anyone
+(the CI checks the PID of kumod).
+
+**Changing the designation later is allowed**: it changes the list of
+every peer of the store, so KumoMTA restarts once on each of them (a
+graceful restart: queues stay in the spools, SMTP clients retry). The
+*Cluster* page names those peers before saving, and `configure-module`
+returns `tsa_peers_restart` with them; removing the last designated host
+returns `tsa_no_host`. It is allowed rather than locked: a restart
+per peer is the same cost as a TSA host joining or leaving, which
+the cluster must handle anyway.
+
+While designated hosts exist and none answers (TCP check of the health
+check), `get-configuration` returns the warning `tsa_unreachable`: the
+automation is paused, the shaping limits still apply. Records queued for
 the daemon of a peer that left are discarded instead of being delivered.
+
+## DKIM keys in a cluster
+
+Every instance must sign with the same key, so in a cluster a key is
+generated once and imported everywhere else, never overwritten:
+
+- `configure-module` does not generate missing keys (a standalone instance
+  still does).
+- `generate-dkim-key` takes `source`: `generate` (default), `shared` (the key
+  at the OpenBao path), `import` (`private_key`, PEM) or `peer` (`peer`: the
+  kumomta instance to copy it from).
+- With OpenBao on and the same path on every instance, the path is shared:
+  a key that exists there is never replaced (`shared_key_exists`); use
+  `shared`. `add-domain` and the domain API use the shared key when one
+  exists.
+- Without OpenBao, `peer` copies the key through the guarded action
+  `reveal-dkim-key` of the peer (role `clusterpeer`, `kumomta@any:clusterpeer`;
+  readers cannot run it, the key is never logged, and NS8 keeps the task
+  output where other modules cannot read it).
+- Rotation in place is refused (`cluster_rotation_refused`): add the domain
+  with a new selector on every instance, publish the new record, then
+  remove the old selector.
+
+The *Domains* page shows *Use the shared key* and *Import key* (from another
+instance, or a PEM key) for a domain without key in a cluster.
 
 ## Failure modes
 
@@ -255,20 +297,22 @@ is not offered yet.
   same store. ns8-valkey credentials are requested again by the new
   instance; the manual password comes back from the backup.
 - Upgrade from an earlier version: nothing changes until a store is
-  chosen. The TSA port is allocated when TSA is turned on (the image asks
-  for three TCP ports). The `clusterpeer` role is defined by the upgrade;
+  chosen. The TSA port is allocated when TSA is turned on.
+- Ports and permissions on a new install: NS8 allocates the whole
+  `org.nethserver.tcp-ports-demand` (3) when the module is added, and its
+  `allocate-ports` refuses more than the demand, so the third port cannot
+  be allocated later: it is reserved at install, with nothing listening on
+  it and no firewall rule until TSA is turned on. The authorizations
+  (`node:portsadm`, `kumomta@any:clusterpeer`, `valkey@any:valkeyclient`)
+  come only from the image label at install or update; a module cannot
+  grant itself a role later, so they are always declared. They give access
+  only to the guarded cluster actions and to the module's own ports. The `clusterpeer` role is defined by the upgrade;
   NS8 grants it to the other instances when a module is added or the core
   is updated, until then use the store settings instead of `cluster_join`.
 - Removal: the peer record is deleted and the peers drop its daemon.
 
 ## Not implemented
 
-- Sharing the domains, DKIM keys and integration credentials between
-  instances: each instance is configured on its own. With OpenBao, DKIM
-  keys can be shared by using the same OpenBao path on every instance; add
-  each domain on every instance with the same selector and **import** the
-  same key (a new key generated on another instance would replace it).
-- Per-node egress limits: every instance uses the egress source
-  `default`, so the throttle keys (`<source>-><site>`) and the limits are
-  global per destination, not per sending IP.
+- Sharing the domains and the integration credentials between instances:
+  each instance is configured on its own (DKIM keys: see above).
 - Draining a node to another one from the UI.

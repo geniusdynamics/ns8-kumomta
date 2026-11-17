@@ -47,6 +47,12 @@
               <span>{{ status.tsa_listen }}</span>
             </div>
             <div v-if="status.mode !== 'standalone'" class="fact">
+              <span class="label">{{ $t("cluster.tsa_hosts") }}</span>
+              <span>{{
+                (status.tsa_hosts || []).join(", ") || $t("cluster.none")
+              }}</span>
+            </div>
+            <div v-if="status.mode !== 'standalone'" class="fact">
               <span class="label">{{ $t("cluster.tsa_peers") }}</span>
               <span>{{
                 (status.tsa_peers || []).join(", ") || $t("cluster.none")
@@ -60,6 +66,13 @@
             :description="
               $t('cluster.reason_' + status.reason, { store: status.store })
             "
+            :showCloseButton="false"
+          />
+          <NsInlineNotification
+            v-if="tsaUnreachable"
+            kind="warning"
+            :title="$t('cluster.tsa_unreachable_title')"
+            :description="$t('cluster.tsa_unreachable_description')"
             :showCloseButton="false"
           />
           <template v-if="samePeers.length">
@@ -221,17 +234,40 @@
             </template>
 
             <h4 class="mg-bottom-sm">{{ $t("cluster.tsa_title") }}</h4>
-            <NsToggle
-              value="tsa"
-              :label="$t('cluster.tsa_enabled')"
+            <p v-if="choice !== 'none'" class="mg-bottom-sm description">
+              {{ $t("cluster.tsa_designation_description") }}
+            </p>
+            <NsCheckbox
+              :label="
+                choice === 'none'
+                  ? $t('cluster.tsa_enabled')
+                  : $t('cluster.tsa_designated')
+              "
               v-model="tsa_enabled"
-              :disabled="busy || choice === 'join'"
-              class="mg-bottom"
-            >
-              <template #tooltip>{{ $t("cluster.tsa_tooltip") }}</template>
-              <template slot="text-left">{{ $t("common.disabled") }}</template>
-              <template slot="text-right">{{ $t("common.enabled") }}</template>
-            </NsToggle>
+              :disabled="busy"
+              value="tsaDesignated"
+              class="mg-bottom-sm"
+            />
+            <NsInlineNotification
+              v-if="designationChange"
+              kind="warning"
+              :title="$t('cluster.tsa_change_title')"
+              :description="
+                $t('cluster.tsa_change_description', {
+                  peers: samePeers.map((p) => p.module_id).join(', '),
+                })
+              "
+              :showCloseButton="false"
+              class="maxwidth"
+            />
+            <NsInlineNotification
+              v-if="lastTsaHostLeaving"
+              kind="warning"
+              :title="$t('cluster.tsa_last_host_title')"
+              :description="$t('cluster.tsa_last_host_description')"
+              :showCloseButton="false"
+              class="maxwidth"
+            />
             <NsInlineNotification
               v-if="choice !== 'none' && savedStore === 'none'"
               kind="info"
@@ -344,6 +380,32 @@ export default {
     samePeers() {
       return this.peers.filter((p) => p.same_store);
     },
+    // Changing the designation restarts kumod once on the peers of the
+    // same store: their list of tsa-daemons changes
+    designationChange() {
+      return (
+        this.savedStore !== "none" &&
+        this.choice === this.savedStore &&
+        this.tsa_enabled !== this.tsaSaved &&
+        this.samePeers.length > 0
+      );
+    },
+    lastTsaHostLeaving() {
+      const hosts = this.status.tsa_hosts || [];
+      return (
+        this.savedStore !== "none" &&
+        this.tsaSaved &&
+        !this.tsa_enabled &&
+        hosts.filter((h) => h !== this.instanceName).length === 0
+      );
+    },
+    tsaUnreachable() {
+      return (
+        (this.status.tsa_hosts || []).length > 0 &&
+        this.status.mode !== "standalone" &&
+        !this.status.tsa_reachable
+      );
+    },
   },
   created() {
     this.getConfiguration();
@@ -398,7 +460,10 @@ export default {
           this.focusElement("cluster_join");
           return;
         }
-        data = { cluster_join: this.cluster_join };
+        data = {
+          cluster_join: this.cluster_join,
+          tsa_enabled: this.tsa_enabled,
+        };
       } else if (this.choice === "valkey") {
         if (!this.cluster_valkey) {
           this.error.cluster_valkey = this.$t("common.required");
@@ -478,6 +543,10 @@ export default {
   margin: 0 0 $spacing-04 $spacing-07;
   color: $text-02;
   font-size: 0.875rem;
+}
+.description {
+  color: $text-02;
+  max-width: 38rem;
 }
 .peers {
   list-style: disc;

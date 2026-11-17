@@ -528,9 +528,32 @@ end)
 
 -- Egress paths: traffic shaping, plus port, TLS and authentication of the
 -- inbound routes and the smarthost
+-- Overall limits of a sending IP (egress source), all destinations
+-- together: named limits, shared through the throttle store of a cluster.
+-- Only real mail destinations count (not the TSA and webhook log hooks).
+local function add_ip_limits(params, domain, egress_source)
+  if not string.find(domain, '.', 1, true) or string.sub(domain, -12) == '.tsa.kumomta' then
+    return
+  end
+  local limits = (policy_data('ip_limits.toml').source or {})[egress_source]
+  if not limits then
+    return
+  end
+  for key, table_name in pairs {
+    rates = 'additional_message_rate_throttles',
+    connections = 'additional_connection_limits',
+  } do
+    for name, value in pairs(limits[key] or {}) do
+      params[table_name] = params[table_name] or {}
+      params[table_name][name] = value
+    end
+  end
+end
+
 kumo.on('get_egress_path_config', function(domain, egress_source, site_name)
   local params =
     shaper.get_egress_path_config(domain, egress_source, site_name, true)
+  add_ip_limits(params, domain, egress_source)
   local q = policy_data('queues.toml')
   local route = (q.route or {})[domain]
   local smarthost = q.smarthost or {}

@@ -166,9 +166,10 @@ secrets.
 | `add-domain` | admin | `{"domain", "selector", "owner", "tenant", "dkim_private_key"}` | the domain object |
 | `validate-domain` | admin | `{"domain"}`, or `{}` for all | `{"domains": [...]}` |
 | `remove-domain` | admin | `{"domain"}` | `{"domain", "removed": true}` |
-| `generate-dkim-key` | admin | `{"domain", "rotate"}` | `{"domain", "selector", "key_location", "dkim_record"}` |
+| `generate-dkim-key` | admin | `{"domain", "rotate", "source", "private_key", "peer"}` | `{"domain", "selector", "key_location", "dkim_record"}` |
 | `list-openbao-only-secrets` | reader | | see [openbao.md](openbao.md) |
 | `copy-openbao-to-local` | admin | | `{"copied": [...], "failed": [...]}` |
+| `reveal-dkim-key` | clusterpeer (other kumomta instances) | `{"domain", "selector"}` | the DKIM private key, for `generate-dkim-key` with `source: peer` |
 | `reveal-cluster-settings` | clusterpeer (other kumomta instances) | | cluster store settings and the manual store password, see [cluster.md](cluster.md) |
 | `get-queue-status` | reader | | queue and delivery counters |
 | `list-recent-events` | reader | `{"types", "limit", "segments"}` | recent log records |

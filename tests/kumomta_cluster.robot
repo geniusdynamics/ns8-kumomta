@@ -85,6 +85,16 @@ Valkey record is published
     ${output}  ${rc} =    In module    ${module}    python3 -c 'import agent; print(agent.redis_connect(use_replica=True).hget("module/${VALKEY_ID}/srv/tcp/valkey", "host") or "")'
     Should Not Be Empty    ${output}    no valkey record yet
 
+Main PID of
+    [Arguments]    ${module}
+    ${output}  ${rc} =    In module    ${module}    systemctl --user show -p MainPID --value kumomta.service
+    RETURN    ${output}
+
+Store has per-IP keys
+    [Arguments]    ${pattern}
+    ${output} =    Execute Command    podman exec kumomta-ci-valkey valkey-cli -h ${VPN_ADDR} -p ${VALKEY_PORT} --no-auth-warning -a ${STORE_PASS} --scan --pattern '*${pattern}*'
+    Should Not Be Empty    ${output}    no ${pattern} key in the store yet
+
 Store has throttle keys
     ${output} =    Execute Command    podman exec kumomta-ci-valkey valkey-cli -h ${VPN_ADDR} -p ${VALKEY_PORT} --no-auth-warning -a ${STORE_PASS} DBSIZE
     Should Be True    int('${output}'.strip() or 0) > 0    no key in the store yet
@@ -148,22 +158,42 @@ Check if an instance uses a manual store with tsa-daemon
     Should Contain    ${output}    'tsa': '1'
     Should Not Contain    ${output}    ${ACL_PASS}
 
-Check if a second instance joins with cluster_join
+Check if a second instance joins with cluster_join without restarting the first
     Skip If    '${VPN_ADDR}' == ''    no cluster VPN address on this node
+    ${pid_before} =    Main PID of    ${A}
     ${result} =    Run on    ${B}    configure-module    {"cluster_join":"${A}"}
     ${config} =    Mode is    ${B}    shared
     Should Be Equal    ${config}[cluster_store]    manual
-    Should Be True    ${config}[tsa_enabled]
+    # The designation is not copied: B is not a TSA host
+    Should Not Be True    ${config}[tsa_enabled]
     Should Be True    ${config}[cluster_redis_password_set]
     ${peers} =    Evaluate    [p['module_id'] for p in $config['cluster_peers'] if p['same_store']]
     Should Contain    ${peers}    ${A}
+    ${hosts} =    Evaluate    $config['cluster_status']['tsa_hosts']
+    Should Be Equal    ${hosts}    ${{ ['${A}'] }}
     Length Should Be    ${config}[cluster_status][tsa_peers]    1
     ${output}  ${rc} =    In module    ${B}    stat -c %a secrets/cluster_redis_password
     Should Be Equal    ${output}    600
     Unit is active    ${B}    kumomta.service
+    ${output}  ${rc} =    In module    ${B}    systemctl --user is-active kumomta-tsa.service
+    Should Not Be Equal    ${output}    active
+    # A peer that is not a TSA host joins: the event reaches A, whose list of
+    # daemons does not change, so its kumod keeps running
+    Sleep    20 sec
+    In module    ${A}    kumomta-cluster-check --now
+    ${pid_after} =    Main PID of    ${A}
+    Should Be Equal    ${pid_before}    ${pid_after}
+    Peer daemon is listed    ${A}    0
+
+Check if designating a second TSA host restarts the peers once
+    Skip If    '${VPN_ADDR}' == ''    no cluster VPN address on this node
+    ${result} =    Run on    ${B}    configure-module    {"tsa_enabled":true}
+    ${ids} =    Evaluate    [w['id'] for w in $result['warnings']]
+    Should Contain    ${ids}    tsa_peers_restart
     Unit is active    ${B}    kumomta-tsa.service
-    # The event of the new peer makes the first instance publish to it too
     Wait Until Keyword Succeeds    2 min    10 sec    Peer daemon is listed    ${A}    1
+    ${config} =    Configuration of    ${B}
+    Length Should Be    ${config}[cluster_status][tsa_hosts]    2
 
 Check if the instances share the throttle store
     Skip If    '${VPN_ADDR}' == ''    no cluster VPN address on this node
@@ -172,6 +202,53 @@ Check if the instances share the throttle store
     ...    return_rc=True
     Should Be Equal As Integers    ${rc}  0    ${output}
     Wait Until Keyword Succeeds    3 min    10 sec    Store has throttle keys
+
+Check if each sending IP gets its own limits in the shared store
+    Skip If    '${VPN_ADDR}' == ''    no cluster VPN address on this node
+    ${output}  ${rc} =    Execute Command    api-cli run module/${A}/configure-module --data '{"sending_ips":[{"address":"192.0.2.77"}]}'
+    ...    return_rc=True
+    Should Not Be Equal As Integers    ${rc}  0
+    Should Contain    ${output}    address_not_local
+    ${address} =    Execute Command    ip -4 -o route get 192.0.2.1 | grep -o 'src [0-9.]*' | cut -d' ' -f2
+    ${source} =    Evaluate    'ip-' + '${address}'.replace('.', '-')
+    ${result} =    Run on    ${A}    configure-module    {"sending_ips":[{"address":"${address}","weight":1,"per_minute":1000,"per_hour":0,"per_day":0,"max_connections":20,"providers":[{"provider":"google","per_minute":200,"per_hour":0,"per_day":0,"max_connections":5},{"provider":"domain","match":"example.org","per_minute":0,"per_hour":0,"per_day":7,"max_connections":0}]}]}
+    ${config} =    Configuration of    ${A}
+    Should Be Equal    ${config}[sending_ips][0][address]    ${address}
+    ${output}  ${rc} =    In module    ${A}    grep -c -F '"source_address" = "${address}"' kumomta/sources.toml
+    Should Be Equal    ${output}    1
+    ${output}  ${rc} =    In module    ${A}    grep -c -F '"ns8-${source}-min" = "1000/min"' kumomta/ip_limits.toml
+    Should Be Equal    ${output}    1
+    ${output}  ${rc} =    In module    ${A}    grep -c -F '"ns8-${source}-google-min" = "200/min"' kumomta/shaping.toml
+    Should Be Equal    ${output}    1
+    Unit is active    ${A}    kumomta.service
+    ${output}  ${rc} =    Execute Command    python3 ${CHECK} submit 127.0.0.1 587 ci-cluster 'Ci,Cluster,Pass,2026' ci@${CI_DOMAIN} per-ip@example.org
+    ...    return_rc=True
+    Should Be Equal As Integers    ${rc}  0    ${output}
+    # The overall and the per-destination limits of the IP are named
+    # throttles in the shared store
+    Wait Until Keyword Succeeds    3 min    10 sec    Store has per-IP keys    ns8-${source}-min
+    Wait Until Keyword Succeeds    1 min    10 sec    Store has per-IP keys    ns8-${source}-ns8-domain-example-org-d
+
+Check if a DKIM key is imported from a peer, never regenerated
+    Skip If    '${VPN_ADDR}' == ''    no cluster VPN address on this node
+    ${result} =    Run on    ${A}    configure-module    {"domains":[{"domain":"cluster.${CI_DOMAIN}","selector":"c1"}]}
+    ${result} =    Run on    ${B}    configure-module    {"domains":[{"domain":"cluster.${CI_DOMAIN}","selector":"c1"}]}
+    # In a cluster no key is made up by configure-module
+    ${config} =    Configuration of    ${B}
+    Should Be Equal    ${config}[domains][0][key_location]    missing
+    ${keyA} =    Run on    ${A}    generate-dkim-key    {"domain":"cluster.${CI_DOMAIN}"}
+    Should Be Equal    ${keyA}[key_location]    local
+    ${output}  ${rc} =    Execute Command    api-cli run module/${A}/generate-dkim-key --data '{"domain":"cluster.${CI_DOMAIN}","rotate":true}'
+    ...    return_rc=True
+    Should Not Be Equal As Integers    ${rc}  0
+    Should Contain    ${output}    cluster_rotation_refused
+    ${keyB} =    Run on    ${B}    generate-dkim-key    {"domain":"cluster.${CI_DOMAIN}","source":"peer","peer":"${A}"}
+    ${text} =    Evaluate    json.dumps($keyB)    modules=json
+    Should Not Contain    ${text}    PRIVATE KEY
+    Should Be Equal    ${keyB}[key_location]    local
+    Should Be Equal    ${keyB}[dkim_record][value]    ${keyA}[dkim_record][value]
+    ${output}  ${rc} =    In module    ${B}    stat -c %a dkim/cluster.${CI_DOMAIN}/c1.key
+    Should Be Equal    ${output}    600
 
 Check if a store outage falls back to local throttles and keeps sending
     Skip If    '${VPN_ADDR}' == ''    no cluster VPN address on this node

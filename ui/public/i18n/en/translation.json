@@ -106,7 +106,8 @@
     "remove-domain": "Remove sending domain",
     "validate-domain": "Check DNS of sending domain",
     "list-domains": "List sending domains",
-    "reveal-cluster-settings": "Copy the cluster settings"
+    "reveal-cluster-settings": "Copy the cluster settings",
+    "reveal-dkim-key": "Copy a DKIM key"
   },
   "error": {
     "error": "Error",
@@ -174,7 +175,18 @@
     "check_status_fail": "wrong",
     "check_status_missing": "not found",
     "check_status_unchecked": "not checked",
-    "remove_api_confirm": "Remove {domain}, added by the integration {owner}? Its DKIM key is deleted"
+    "remove_api_confirm": "Remove {domain}, added by the integration {owner}? Its DKIM key is deleted",
+    "use_shared_key": "Use the shared key",
+    "import_key": "Import key",
+    "import_title": "Import the DKIM key of {domain}",
+    "import_from_peer": "Copy it from another instance of the cluster",
+    "import_pem": "Paste a PEM private key",
+    "import_peer": "Instance",
+    "import_pem_label": "Private key (PEM)",
+    "import_pem_helper": "Never shown again, stored in a file readable only by the module, or in OpenBao",
+    "cluster_keys_title": "Cluster: one key per domain for every instance",
+    "cluster_keys_openbao": "The instances read the DKIM keys from the same OpenBao path. Generate the key of a new domain once; on the other instances use the shared key. A key that exists at the shared path is never replaced, and keys are not rotated in place: add the domain with a new selector to rotate.",
+    "cluster_keys_local": "Every instance must sign with the same key. Generate the key of a new domain on one instance, then on the others import it: copy it from that instance (only KumoMTA instances can ask for it) or paste the PEM key. Keys are not generated automatically in a cluster, and not rotated in place: add the domain with a new selector to rotate."
   },
   "delivery": {
     "title": "Delivery",
@@ -318,7 +330,17 @@
     "no_cluster_address": "This node has no cluster VPN address",
     "cluster_join_failed": "The other instance did not hand over its cluster settings: is it clustered, and is this instance authorized?",
     "tsa_port_unavailable": "Cannot allocate a TCP port for the automation daemon",
-    "not_clustered": "That instance is not clustered"
+    "not_clustered": "That instance is not clustered",
+    "duplicate_address": "This sending IP is listed twice",
+    "invalid_ip_address": "Not an IP address",
+    "address_not_local": "This address is not assigned to this node",
+    "duplicate_provider": "This destination is listed twice for the same IP",
+    "shared_key_exists": "A key already exists at the shared OpenBao path: use the shared key, or import that same key",
+    "shared_key_missing": "There is no key at the shared OpenBao path",
+    "cluster_rotation_refused": "In a cluster, keys are not rotated in place: add the domain with a new selector on every instance",
+    "openbao_read_failed": "Cannot read OpenBao",
+    "peer_key_unavailable": "That instance has no key for this domain and selector, or did not hand it over",
+    "key_missing": "No key for this domain"
   },
   "warnings": {
     "sink_mode_title": "Sink mode is on: no mail is delivered",
@@ -407,6 +429,39 @@
     "reason_store_not_found": "The Valkey instance {store} does not exist or publishes no endpoint.",
     "reason_credentials_unavailable": "No credentials for the store {store}: check that this instance is authorized, then save again.",
     "reason_store_unreachable": "The store {store} does not answer. This instance goes back to it automatically.",
-    "reason_no_cluster_address": "This node has no cluster VPN address."
+    "reason_no_cluster_address": "This node has no cluster VPN address.",
+    "tsa_hosts": "Designated TSA hosts",
+    "tsa_designated": "This instance is a designated TSA host",
+    "tsa_designation_description": "Only designated hosts run the automation daemon, and every instance of the store sends its log records to them. Instances that are not TSA hosts can join and leave without restarting the others.",
+    "tsa_change_title": "The other instances restart once",
+    "tsa_change_description": "Changing the designation changes the list of automation daemons of the instances of the same store: KumoMTA restarts once on {peers}.",
+    "tsa_last_host_title": "Last TSA host",
+    "tsa_last_host_description": "No other instance is a designated TSA host: the traffic shaping automation of the cluster stops.",
+    "tsa_unreachable_title": "No TSA host answers",
+    "tsa_unreachable_description": "No designated TSA host answers: the automation is paused, the shaping limits still apply."
+  },
+  "sending_ips": {
+    "title": "Sending IPs",
+    "description": "The addresses KumoMTA sends from, with their limits. Each IP has overall limits (all destinations together) and, for the large providers or any domain or MX, its own limits, so that one provider cannot use the whole budget of the IP. 0 means no limit. Without any IP here, KumoMTA sends from the address of the default route.",
+    "cluster_title": "Cluster",
+    "cluster_description": "The counters are in the shared throttle store: each limit holds per IP across the instances. List the IPs of this node on this instance.",
+    "address": "IP address",
+    "address_placeholder": "default route",
+    "ehlo_domain": "EHLO name",
+    "weight": "Weight",
+    "overall_limits": "Overall limits of this IP",
+    "provider_limits": "Limits of this IP per destination",
+    "per_minute": "Per minute",
+    "per_hour": "Per hour",
+    "per_day": "Per day",
+    "max_connections": "Max connections",
+    "provider": "Destination",
+    "provider_domain": "Domain",
+    "provider_mx": "MX host name suffix",
+    "add_provider": "Add destination",
+    "add_presets": "Add the large providers",
+    "remove_ip": "Remove IP",
+    "add_ip": "Add sending IP",
+    "saving": "Saving the sending IPs"
   }
 }

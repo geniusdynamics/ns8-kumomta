@@ -169,6 +169,7 @@ secrets.
 | `generate-dkim-key` | admin | `{"domain", "rotate"}` | `{"domain", "selector", "key_location", "dkim_record"}` |
 | `list-openbao-only-secrets` | reader | | see [openbao.md](openbao.md) |
 | `copy-openbao-to-local` | admin | | `{"copied": [...], "failed": [...]}` |
+| `reveal-cluster-settings` | clusterpeer (other kumomta instances) | | cluster store settings and the manual store password, see [cluster.md](cluster.md) |
 | `get-queue-status` | reader | | queue and delivery counters |
 | `list-recent-events` | reader | `{"types", "limit", "segments"}` | recent log records |
 

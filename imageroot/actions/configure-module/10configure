@@ -18,6 +18,27 @@ import kumomta_ns8 as kumo
 data = json.load(sys.stdin)
 lock = kumo.settings_lock() # the API daemon also changes the domains
 current = kumo.load_settings()
+
+# Join a cluster: copy the store settings of a peer (guarded action of the
+# peer, role clusterpeer). The password of a manual store is stored below
+# like a password of the input, and never logged.
+if data.get("cluster_join"):
+    import agent.tasks
+    ret = agent.tasks.run(agent_id=f"module/{data['cluster_join']}", action="reveal-cluster-settings",
+                          data={}, extra={"isNotificationHidden": True})
+    if ret.get("exit_code") != 0:
+        print(agent.SD_ERR + f"reveal-cluster-settings of {data['cluster_join']} failed "
+              f"(exit code {ret.get('exit_code')})", file=sys.stderr)
+        agent.set_status('validation-failed')
+        json.dump([{'field': 'cluster_join', 'parameter': 'cluster_join', 'value': data['cluster_join'],
+                    'error': 'cluster_join_failed'}], fp=sys.stdout)
+        sys.exit(3)
+    peer = ret["output"]
+    for key in ("cluster_store", "cluster_valkey", "cluster_redis_nodes", "cluster_redis_username",
+                "cluster_redis_cluster", "tsa_enabled"):
+        data[key] = peer[key]
+    if peer.get("cluster_redis_password"):
+        data["cluster_redis_password"] = peer["cluster_redis_password"]
 settings = dict(current)
 settings.update({k: v for k, v in data.items() if k in kumo.DEFAULTS and not k.endswith("_set")})
 
@@ -97,7 +118,7 @@ else:
 
 
 LOCAL_NAMES = {"smarthost": "smarthost_password", "webhook": "webhook_token",
-               "webhook_signing": "webhook_signing_secret"}
+               "webhook_signing": "webhook_signing_secret", "cluster_redis": kumo.CLUSTER_PASSWORD}
 
 
 def store_secret(name, field, value):
@@ -136,6 +157,28 @@ elif data.get("webhook_signing_secret"):
     settings["webhook_signing_secret_set"] = True
 elif not settings["vault_enabled"]:
     settings["webhook_signing_secret_set"] = bool(kumo.read_secret("webhook_signing_secret"))
+
+# Throttle store of the cluster. ns8-valkey: per-instance credentials
+# from its grant-client action (25cluster), dropped when the store changes.
+# Manual: the password of the input, shared through OpenBao when it is on.
+if kumo.store_identity(settings) != kumo.store_identity(current):
+    kumo.forget_store_credentials()
+    if settings["cluster_store"] != "manual" or not data.get("cluster_redis_password"):
+        settings["cluster_redis_password_set"] = False
+if settings["cluster_store"] == "manual":
+    settings["cluster_redis_nodes"] = [u.strip() for u in settings["cluster_redis_nodes"]]
+    if data.get("cluster_redis_password_clear"):
+        kumo.remove_secret(kumo.CLUSTER_PASSWORD)
+        settings["cluster_redis_password_set"] = False
+    elif data.get("cluster_redis_password"):
+        store_secret("cluster_redis", "cluster_redis_password", data["cluster_redis_password"])
+        settings["cluster_redis_password_set"] = True
+    elif not settings["vault_enabled"]:
+        settings["cluster_redis_password_set"] = bool(kumo.read_secret(kumo.CLUSTER_PASSWORD))
+else:
+    settings["cluster_redis_password_set"] = False
+    if settings["cluster_store"] == "none":
+        settings["cluster_valkey"] = ""
 
 # The metrics password is checked by kumod itself: always a local file
 if data.get("metrics_password"):

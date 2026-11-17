@@ -390,6 +390,9 @@
                     },
                     "message": {
                         "type": "string"
+                    },
+                    "reason": {
+                        "type": "string"
                     }
                 }
             }
@@ -459,6 +462,94 @@
                 "domains": {
                     "type": "string"
                 }
+            }
+        },
+        "cluster_store": {
+            "type": "string",
+            "enum": [
+                "none",
+                "valkey",
+                "manual"
+            ]
+        },
+        "cluster_valkey": {
+            "type": "string"
+        },
+        "cluster_redis_nodes": {
+            "type": "array",
+            "items": {
+                "type": "string"
+            }
+        },
+        "cluster_redis_username": {
+            "type": "string"
+        },
+        "cluster_redis_cluster": {
+            "type": "boolean"
+        },
+        "cluster_redis_password_set": {
+            "type": "boolean"
+        },
+        "tsa_enabled": {
+            "type": "boolean"
+        },
+        "tsa_port": {
+            "type": "integer"
+        },
+        "cluster_status": {
+            "type": "object",
+            "required": [
+                "mode",
+                "reason"
+            ],
+            "properties": {
+                "mode": {
+                    "type": "string",
+                    "enum": [
+                        "standalone",
+                        "shared",
+                        "local"
+                    ]
+                },
+                "reason": {
+                    "type": "string"
+                },
+                "store": {
+                    "type": "string"
+                },
+                "nodes": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "tsa_listen": {
+                    "type": "string"
+                },
+                "tsa_peers": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    }
+                }
+            }
+        },
+        "valkey_instances": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": [
+                    "module_id"
+                ]
+            }
+        },
+        "cluster_peers": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "required": [
+                    "module_id"
+                ]
             }
         }
     },

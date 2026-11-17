@@ -23,7 +23,9 @@ import os
 import re
 import secrets
 import string
+import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 
@@ -40,6 +42,11 @@ OPENBAO_ENV = "openbao.env"     # EnvironmentFile of kumomta.service
 API_ENV = "secrets/api.env"     # credentials of the local HTTP API
 RESTART_STAMP = ".init-hash"    # hash of the settings read only at startup
 WARNINGS_FILE = ".configure-warnings.json"  # configure-module output
+CLUSTER_DIR = "cluster"         # cluster state, no secrets
+CLUSTER_STATE = "cluster/state.json"        # mode, reason, endpoints
+CLUSTER_STORE = "cluster/store.json"        # store endpoint and user name
+CLUSTER_PASSWORD = "cluster_redis_password"  # under state/secrets, 0600
+TSA_STAMP = ".tsa-hash"         # hash of tsa_init.lua: a change restarts tsa-daemon
 
 # Paths inside the container
 C_POLICY = "/opt/kumomta/etc/policy"
@@ -113,17 +120,30 @@ DEFAULTS = {
     "require_verified_domains": True,
     "spf_include": "",                # SPF mechanism to suggest, default a:<hostname>
     "bounce_domain": "",              # return path / OOB / FBL domain, empty disables
+    # Multi-node cluster (docs/cluster.md): every instance is a peer. A
+    # shared throttle store makes the throttles and connection limits
+    # global: "none" (standalone, default), "valkey" (an ns8-valkey
+    # instance, credentials from its grant-client action) or "manual" (any
+    # Redis or Valkey, single node or Redis Cluster)
+    "cluster_store": "none",
+    "cluster_valkey": "",
+    "cluster_redis_nodes": [],        # manual: redis:// or rediss:// URLs, no password
+    "cluster_redis_username": "",
+    "cluster_redis_cluster": False,   # manual: Redis Cluster protocol with one URL
+    # Traffic shaping automation daemon (tsa-daemon) of this instance
+    "tsa_enabled": False,
     # Non-secret markers of the write-only secrets
     "smarthost_password_set": False,
     "webhook_token_set": False,
     "metrics_password_set": False,
     "webhook_signing_secret_set": False,
+    "cluster_redis_password_set": False,
 }
 
 # configure-module fields that are secrets: written to state/secrets or
 # OpenBao, never returned
 SECRET_FIELDS = ["smarthost_password", "webhook_token", "vault_token", "metrics_password",
-                 "webhook_signing_secret"]
+                 "webhook_signing_secret", "cluster_redis_password"]
 
 RATE_RE = re.compile(r"^[0-9]+/(s|sec|second|m|min|minute|h|hr|hour|d|day)$")
 DURATION_RE = re.compile(r"^[0-9]+ ?(s|sec|secs|seconds|m|min|mins|minutes|h|hr|hrs|hours|d|day|days|w|week|weeks)$")
@@ -132,6 +152,9 @@ DOMAIN_RE = re.compile(r"^(\*\.)?([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9]
 SELECTOR_RE = re.compile(r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$")
 USERNAME_RE = re.compile(r"^[A-Za-z0-9._@+-]{1,128}$")
 INTEGRATION_RE = re.compile(r"^[a-z0-9][a-z0-9-]{2,31}$")
+MODULE_ID_RE = re.compile(r"^[a-z][a-z0-9-]*[0-9]+$")
+# A store URL never carries credentials: the password is a 0600 file
+REDIS_URL_RE = re.compile(r"^rediss?://(\[[0-9a-fA-F:.]+\]|[A-Za-z0-9.-]+)(:[0-9]{1,5})?(/[0-9]{0,2})?$")
 TENANT_RE = re.compile(r"^[A-Za-z0-9._-]{0,64}$")
 
 
@@ -586,6 +609,10 @@ def vault_only_items(settings):
     if settings["webhook_token_set"] and not read_secret("webhook_token"):
         items.append({"kind": "webhook_token", "name": "webhook_token",
                       "path": openbao_secret_path(settings, "webhook")})
+    if (settings.get("cluster_redis_password_set") and settings.get("cluster_store") == "manual"
+            and not read_secret(CLUSTER_PASSWORD)):
+        items.append({"kind": "cluster_redis_password", "name": "cluster_redis_password",
+                      "path": openbao_secret_path(settings, "cluster_redis")})
     if settings.get("webhook_signing_secret_set") and not read_secret("webhook_signing_secret"):
         items.append({"kind": "webhook_signing_secret", "name": "webhook_signing_secret",
                       "path": openbao_secret_path(settings, "webhook_signing")})
@@ -608,7 +635,7 @@ def copy_vault_item_to_local(settings, item, env=None):
         store_dkim_private(item["domain"], item["selector"], value)
     elif item["kind"] == "smarthost_password":
         write_secret("smarthost_password", value)
-    elif item["kind"] in ("webhook_token", "webhook_signing_secret"):
+    elif item["kind"] in ("webhook_token", "webhook_signing_secret", "cluster_redis_password"):
         write_secret(item["kind"], value)
     else:
         raise RuntimeError(f"unknown item kind {item['kind']}")
@@ -893,6 +920,463 @@ def validate_domains(names=None, owner=None):
 
 
 # --------------------------------------------------------------------------
+# Multi-node cluster (docs/cluster.md). Every instance is a peer: no
+# coordinator. A shared throttle store (an ns8-valkey instance or any
+# Redis/Valkey) makes throttles and connection limits global; each peer
+# can run tsa-daemon, and every kumod publishes its log records to the
+# daemons of the peers that use the same store.
+# --------------------------------------------------------------------------
+
+CLUSTER_STORES = ["none", "valkey", "manual"]
+CLUSTER_SERVICE = "kumomta-cluster"       # module/<id>/srv/tcp/kumomta-cluster
+CLUSTER_EVENT = "kumomta-cluster-changed"
+CLUSTER_FAILURES_BEFORE_LOCAL = 2         # failed checks before local throttles
+# ns8-valkey integration: service records and the guarded action that
+# creates the client credentials (role valkeyclient, authorization
+# valkey@any:valkeyclient in build-images.sh)
+VALKEY_SERVICE = "valkey"
+VALKEY_GRANT_ACTION = "grant-client"
+
+CLUSTER_REASONS = {
+    "store_not_found": "the Valkey instance {store} does not exist or publishes no endpoint",
+    "credentials_unavailable": "no credentials for the throttle store {store}",
+    "store_unreachable": "the throttle store {store} does not answer",
+    "no_cluster_address": "this node has no cluster VPN address",
+}
+
+
+def clustered(settings):
+    return settings.get("cluster_store", "none") != "none"
+
+
+def tsa_port():
+    """TCP port of tsa-daemon: the third TCP port of the module, or the
+    port allocated later by an install made with an image that asked for
+    two ports only. None when missing."""
+    ports = [p for p in os.environ.get("TCP_PORTS", "").split(",") if p]
+    if len(ports) >= 3:
+        return int(ports[2])
+    if os.environ.get("KUMO_TSA_PORT"):
+        return int(os.environ["KUMO_TSA_PORT"])
+    return None
+
+
+def ensure_tsa_port():
+    """Allocate the TSA port of an upgraded install, once. The caller dumps
+    the environment (agent.dump_env)."""
+    port = tsa_port()
+    if port:
+        return port
+    start, _end = agent.allocate_ports(1, "tcp", keep_existing=True)
+    agent.set_env("KUMO_TSA_PORT", str(start))
+    os.environ["KUMO_TSA_PORT"] = str(start)
+    return start
+
+
+def kumomta_modules():
+    """{module_id: node_id} of the kumomta instances of the cluster"""
+    rdb = agent.redis_connect(use_replica=True)
+    found = {}
+    for module_id, node_id in (rdb.hgetall("cluster/module_node") or {}).items():
+        image_url = rdb.hget(f"module/{module_id}/environment", "IMAGE_URL") or ""
+        image_name = image_url.rsplit("/", 1)[-1].split(":", 1)[0].split("@", 1)[0]
+        if image_name == "kumomta":
+            found[module_id] = str(node_id)
+    return found
+
+
+def service_records(service):
+    """{module_id: record} of the providers of a tcp service (no secrets)"""
+    rdb = agent.redis_connect(use_replica=True)
+    return {rec["module_id"]: rec for rec in agent.list_service_providers(rdb, service, "tcp")}
+
+
+def _read_json(path):
+    try:
+        with open(path) as fp:
+            return json.load(fp)
+    except (FileNotFoundError, ValueError):
+        return {}
+
+
+def read_cluster_state():
+    return _read_json(CLUSTER_STATE)
+
+
+def write_cluster_state(state):
+    os.makedirs(CLUSTER_DIR, mode=0o700, exist_ok=True)
+    return write_file(CLUSTER_STATE, json.dumps(state, indent=1, sort_keys=True) + "\n", 0o644)
+
+
+def read_store_info():
+    return _read_json(CLUSTER_STORE)
+
+
+def write_store_info(info):
+    os.makedirs(CLUSTER_DIR, mode=0o700, exist_ok=True)
+    return write_file(CLUSTER_STORE, json.dumps(info, indent=1, sort_keys=True) + "\n", 0o644)
+
+
+def forget_store_credentials():
+    """Drop the password and the user name of the throttle store"""
+    changed = remove_secret(CLUSTER_PASSWORD)
+    try:
+        os.unlink(CLUSTER_STORE)
+        changed = True
+    except FileNotFoundError:
+        pass
+    return changed
+
+
+def _truthy(value):
+    return str(value).lower() in ("1", "true", "yes", "on")
+
+
+def _node_url(host, port, tls=False):
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    return f"{'rediss' if tls else 'redis'}://{host}:{int(port)}/"
+
+
+def store_identity(settings):
+    """Peers with the same identity share the throttles, and publish to
+    each other's tsa-daemon"""
+    if settings["cluster_store"] == "valkey":
+        return "valkey:" + settings["cluster_valkey"]
+    if settings["cluster_store"] == "manual":
+        nodes = sorted(u.rstrip("/").lower() for u in settings["cluster_redis_nodes"])
+        return "manual:" + hashlib.sha256(json.dumps(nodes).encode()).hexdigest()[:16]
+    return ""
+
+
+def store_password(settings):
+    """Password of the store: a local 0600 file, or OpenBao for a manual
+    store while OpenBao is on. "" when unknown."""
+    if settings["cluster_store"] == "manual" and settings["vault_enabled"] and not read_secret(CLUSTER_PASSWORD):
+        try:
+            return openbao_read(settings, openbao_secret_path(settings, "cluster_redis"))
+        except RuntimeError as ex:
+            log(agent.SD_WARNING + f"Cannot read the throttle store password from OpenBao: {ex}")
+            return ""
+    return read_secret(CLUSTER_PASSWORD)
+
+
+def grant_valkey_client(valkey_id):
+    """Ask the ns8-valkey instance for client credentials (guarded action,
+    role valkeyclient). The password goes to a 0600 file; the task output
+    is never logged. Raises RuntimeError."""
+    import agent.tasks
+    ret = agent.tasks.run(agent_id=f"module/{valkey_id}", action=VALKEY_GRANT_ACTION, data={},
+                          extra={"isNotificationHidden": True})
+    if ret.get("exit_code") != 0:
+        raise RuntimeError(f"{VALKEY_GRANT_ACTION} of {valkey_id} failed (exit code {ret.get('exit_code')})")
+    output = ret.get("output") or {}
+    if not isinstance(output, dict) or not output.get("password"):
+        raise RuntimeError(f"{VALKEY_GRANT_ACTION} of {valkey_id} returned no password")
+    write_secret(CLUSTER_PASSWORD, output["password"])
+    write_store_info({
+        "valkey": valkey_id,
+        "granted_to": os.environ.get("MODULE_ID", ""),
+        "username": output.get("username") or "",
+    })
+
+
+def resolve_store(settings, fetch):
+    """({nodes, username, cluster, label}, reason): where the throttle
+    store is and how to log in, no secrets. nodes are redis:// URLs."""
+    if settings["cluster_store"] == "valkey":
+        valkey_id = settings["cluster_valkey"]
+        try:
+            rec = service_records(VALKEY_SERVICE).get(valkey_id)
+        except Exception as ex:
+            log(agent.SD_WARNING + f"Cannot read the Valkey service records: {ex}")
+            rec = None
+        if not rec or not rec.get("host") or not rec.get("port"):
+            return None, "store_not_found"
+        info = read_store_info()
+        if fetch and (not read_secret(CLUSTER_PASSWORD) or info.get("valkey") != valkey_id
+                      or info.get("granted_to") != os.environ.get("MODULE_ID", "")):
+            try:
+                grant_valkey_client(valkey_id)
+            except Exception as ex:
+                log(agent.SD_WARNING + f"Cannot get the Valkey credentials of {valkey_id}: {ex}")
+            info = read_store_info()
+        if not read_secret(CLUSTER_PASSWORD) or info.get("valkey") != valkey_id:
+            return None, "credentials_unavailable"
+        tls = _truthy(rec.get("tls", ""))
+        nodes = [_node_url(rec["host"], rec["port"], tls)]
+        for extra in (rec.get("nodes") or "").split(","):
+            host, _, port = extra.strip().rpartition(":")
+            if host and port.isdigit() and _node_url(host.strip("[]"), port, tls) not in nodes:
+                nodes.append(_node_url(host.strip("[]"), port, tls))
+        return {"nodes": nodes, "username": info.get("username") or "",
+                "cluster": _truthy(rec.get("cluster", "")) or len(nodes) > 1,
+                "label": valkey_id}, ""
+    nodes = list(settings["cluster_redis_nodes"])
+    if not store_password(settings) and settings["cluster_redis_password_set"]:
+        return None, "credentials_unavailable"
+    return {"nodes": nodes, "username": settings["cluster_redis_username"],
+            "cluster": bool(settings["cluster_redis_cluster"]) or len(nodes) > 1,
+            "label": ", ".join(nodes)}, ""
+
+
+def store_ping(store, password, timeout=3.0):
+    """(True, "") when a node of the store answers PING with these
+    credentials. The error never contains the password."""
+    import redis
+    err = "no node"
+    for url in store["nodes"]:
+        try:
+            conn = redis.Redis.from_url(url, username=store.get("username") or None,
+                                        password=password or None, socket_timeout=timeout,
+                                        socket_connect_timeout=timeout)
+            try:
+                if conn.ping():
+                    return True, ""
+            finally:
+                conn.close()
+        except Exception as ex:
+            err = ex.__class__.__name__
+    return False, err
+
+
+def tsa_peers(settings, identity):
+    """TSA URLs of the other peers with the same store"""
+    urls = []
+    try:
+        records = service_records(CLUSTER_SERVICE)
+    except Exception as ex:
+        log(agent.SD_WARNING + f"Cannot read the cluster records: {ex}")
+        return urls
+    for module_id, rec in sorted(records.items()):
+        if module_id == os.environ.get("MODULE_ID") or rec.get("store") != identity:
+            continue
+        if _truthy(rec.get("tsa", "")) and rec.get("host") and rec.get("port"):
+            urls.append(f"http://{rec['host']}:{int(rec['port'])}")
+    return urls
+
+
+def _cluster_local(state, previous, reason, immediate):
+    """Local throttles, unless the store failed only once since it last
+    answered: a short restart of the store does not restart every peer
+    (hysteresis of CLUSTER_FAILURES_BEFORE_LOCAL checks)"""
+    failures = int(previous.get("failures") or 0) + 1
+    if (not immediate and previous.get("mode") == "shared" and previous.get("store") == state["store"]
+            and failures < CLUSTER_FAILURES_BEFORE_LOCAL):
+        kept = dict(previous)
+        kept.update({"failures": failures, "tsa_listen": state["tsa_listen"],
+                     "tsa_publish": state["tsa_publish"], "tsa_subscribe": state["tsa_subscribe"]})
+        return kept
+    state.update({"mode": "local", "reason": reason, "redis": None, "failures": failures})
+    return state
+
+
+def evaluate_cluster(settings, fetch=True, immediate=False):
+    """Decide how kumod uses the cluster and return the new state (no
+    secrets): mode (standalone, shared, local), reason, store, redis
+    {nodes, username, cluster}, tsa_listen, tsa_publish, tsa_subscribe.
+    Network checks only: the caller writes the state and renders.
+
+    fetch: ask ns8-valkey for credentials when needed (not in
+    ExecStartPre). immediate: no hysteresis (startup, explicit changes)."""
+    previous = read_cluster_state()
+    port = tsa_port()
+    state = {"mode": "standalone", "reason": "", "store": "", "store_label": "", "redis": None,
+             "tsa_listen": "", "tsa_publish": [], "tsa_subscribe": [], "failures": 0}
+    if not clustered(settings):
+        if settings["tsa_enabled"] and port:
+            url = f"http://127.0.0.1:{port}"
+            state.update({"tsa_listen": f"127.0.0.1:{port}", "tsa_publish": [url], "tsa_subscribe": [url]})
+        return state
+
+    identity = store_identity(settings)
+    state["store"] = identity
+    _, address = cluster_info()
+    own = ""
+    if settings["tsa_enabled"] and port and address:
+        own = f"http://{address}:{port}"
+        state["tsa_listen"] = f"{address}:{port}"
+    peers = tsa_peers(settings, identity)
+    state["tsa_publish"] = ([own] if own else []) + peers
+    state["tsa_subscribe"] = [own] if own else peers[:1]
+    if not address and settings["cluster_store"] == "valkey":
+        # ns8-valkey is reached through the cluster VPN
+        return _cluster_local(state, previous, "no_cluster_address", True)
+
+    store, reason = resolve_store(settings, fetch)
+    state["store_label"] = store["label"] if store else settings["cluster_valkey"]
+    if not store:
+        return _cluster_local(state, previous, reason, True)
+    ok, err = store_ping(store, store_password(settings))
+    if not ok and fetch and "Authentication" in err and settings["cluster_store"] == "valkey":
+        # ns8-valkey rotated or revoked the credentials: ask again, once
+        try:
+            grant_valkey_client(settings["cluster_valkey"])
+            store, reason = resolve_store(settings, False)
+            if store:
+                ok, err = store_ping(store, store_password(settings))
+        except Exception as ex:
+            log(agent.SD_WARNING + f"Cannot renew the Valkey credentials: {ex}")
+    if not ok or not store:
+        log(agent.SD_WARNING + f"Throttle store {state['store_label']} unreachable: {err}")
+        return _cluster_local(state, previous, "store_unreachable", immediate)
+    state.update({"mode": "shared", "redis": {k: store[k] for k in ("nodes", "username", "cluster")}})
+    return state
+
+
+def cluster_warnings(settings, state=None):
+    """Warning shown on every page while a clustered instance uses local
+    throttles"""
+    state = read_cluster_state() if state is None else state
+    if not clustered(settings) or state.get("mode") != "local":
+        return []
+    reason = state.get("reason") or "store_unreachable"
+    store = state.get("store_label") or settings.get("cluster_valkey") or "?"
+    detail = CLUSTER_REASONS.get(reason, reason).format(store=store)
+    return [{"id": "cluster_degraded", "reason": reason,
+             "message": f"Cluster degraded: {detail}. Throttles and connection limits are local "
+                        "to this instance until the store answers again; mail is still sent"}]
+
+
+def cluster_record(settings, state):
+    """Service record of this peer (no secrets), or None when standalone"""
+    if not clustered(settings):
+        return None
+    _, address = cluster_info()
+    port = tsa_port()
+    return {
+        "host": address or "",
+        "port": str(port) if (settings["tsa_enabled"] and port) else "",
+        "tsa": "1" if (settings["tsa_enabled"] and port) else "0",
+        "store": store_identity(settings),
+        "store_type": settings["cluster_store"],
+        "node": os.environ.get("NODE_ID", ""),
+        "module_uuid": os.environ.get("MODULE_UUID", ""),
+        "hostname": settings["hostname"],
+        "mode": state.get("mode") or "",
+    }
+
+
+def publish_cluster_record(settings, state, force_event=False):
+    """Write module/<id>/srv/tcp/kumomta-cluster. The kumomta-cluster-changed
+    event tells the peers to refresh their tsa-daemon list; a change of the
+    mode alone fires no event."""
+    agent_id = os.environ["AGENT_ID"]
+    key = f"{agent_id}/srv/tcp/{CLUSTER_SERVICE}"
+    rec = cluster_record(settings, state)
+    with agent.redis_connect(privileged=True) as prdb:
+        old = prdb.hgetall(key) or {}
+        changed = (old != (rec or {}))
+        strip = lambda r: {k: v for k, v in (r or {}).items() if k != "mode"}
+        notify = force_event or strip(old) != strip(rec)
+        trx = prdb.pipeline()
+        if changed:
+            trx.delete(key)
+            if rec:
+                trx.hset(key, mapping=rec)
+        if notify:
+            trx.publish(f"{agent_id}/event/{CLUSTER_EVENT}", json.dumps({
+                "module_id": os.environ["MODULE_ID"],
+                "module_uuid": os.environ.get("MODULE_UUID", ""),
+                "node_id": int(os.environ["NODE_ID"]),
+                "store": (rec or {}).get("store", ""),
+            }))
+        trx.execute()
+    return changed
+
+
+def systemctl(*args):
+    return subprocess.run(["systemctl", "--user", *args], stdout=sys.stderr).returncode
+
+
+def _unit_in_use(unit):
+    return systemctl("-q", "is-enabled", unit) == 0 or systemctl("-q", "is-active", unit) == 0
+
+
+def apply_cluster_services(settings, state):
+    """Enable, start or stop tsa-daemon and the health check timer"""
+    if state.get("tsa_listen"):
+        systemctl("enable", "kumomta-tsa.service")
+        if tsa_restart_required() or systemctl("-q", "is-active", "kumomta-tsa.service") != 0:
+            if systemctl("restart", "kumomta-tsa.service") == 0:
+                stamp_tsa()
+    elif _unit_in_use("kumomta-tsa.service"):
+        systemctl("disable", "--now", "kumomta-tsa.service")
+    if clustered(settings):
+        systemctl("enable", "--now", "kumomta-cluster-check.timer")
+    elif _unit_in_use("kumomta-cluster-check.timer"):
+        systemctl("disable", "--now", "kumomta-cluster-check.timer")
+
+
+def _file_digest(path):
+    try:
+        with open(path, "rb") as fp:
+            return hashlib.sha256(fp.read()).hexdigest()
+    except FileNotFoundError:
+        return ""
+
+
+def tsa_restart_required():
+    """tsa-daemon reads its listener only at startup"""
+    try:
+        with open(TSA_STAMP) as fp:
+            stamp = fp.read().strip()
+    except FileNotFoundError:
+        stamp = None
+    return stamp != _file_digest(os.path.join(CONFIG_DIR, "tsa_init.lua"))
+
+
+def stamp_tsa():
+    write_file(TSA_STAMP, _file_digest(os.path.join(CONFIG_DIR, "tsa_init.lua")) + "\n", 0o600)
+
+
+def cluster_check(prestart=False, immediate=False):
+    """Health check of a clustered peer (timer, events, ExecStartPre):
+    evaluate the cluster, render the policy and restart kumod when the
+    throttle store or the tsa-daemon list changes; KumoMTA reads both in
+    its init event only. Returns the new state.
+
+    In ExecStartPre (prestart) nothing is fetched or restarted: kumod
+    starts with the policy rendered here. KumoMTA pings the store in its
+    init event and does not start if it does not answer, so the startup
+    decision is immediate."""
+    settings = load_settings()
+    if not clustered(settings) or not settings["hostname"]:
+        return read_cluster_state()
+    previous = read_cluster_state()
+    # Network checks (and the credentials request) without the lock: the
+    # domain API daemon must not wait for them
+    state = evaluate_cluster(settings, fetch=not prestart, immediate=(prestart or immediate))
+    with settings_lock():
+        current = load_settings()
+        if store_identity(current) != store_identity(settings) \
+                or current["tsa_enabled"] != settings["tsa_enabled"]:
+            return read_cluster_state()  # configure-module changed it meanwhile
+        write_cluster_state(state)
+        changed, restart = write_config(current)
+    if prestart:
+        return state
+    if previous.get("mode") != state.get("mode"):
+        if state.get("mode") == "local":
+            log(agent.SD_WARNING + cluster_warnings(settings, state)[0]["message"])
+        else:
+            log(f"Cluster: {state.get('mode')} throttles with {state.get('store_label')}")
+    try:
+        publish_cluster_record(settings, state)
+    except Exception as ex:
+        log(agent.SD_WARNING + f"Cannot publish the cluster record: {ex}")
+    if systemctl("-q", "is-active", "kumomta.service") == 0:
+        if restart:
+            systemctl("restart", "kumomta.service")
+        elif changed:
+            try:
+                api_request("/api/admin/bump-config-epoch", method="POST")
+            except Exception as ex:
+                log(agent.SD_WARNING + f"Configuration epoch bump failed: {ex}")
+    return state
+
+
+# --------------------------------------------------------------------------
 # Rendering of the KumoMTA policy
 # --------------------------------------------------------------------------
 
@@ -918,7 +1402,7 @@ def init_settings(settings):
         listeners.append({"name": "inbound", "listen": f"0.0.0.0:{settings['inbound_port']}"})
     if settings["submission_enabled"]:
         listeners.append({"name": "submission", "listen": f"0.0.0.0:{settings['submission_port']}"})
-    return {
+    init = {
         "hostname": settings["hostname"],
         "http_listen": f"127.0.0.1:{os.environ.get('TCP_PORT', '8000')}",
         "listeners": listeners,
@@ -928,6 +1412,44 @@ def init_settings(settings):
         "webhook": bool(settings["webhook_enabled"] and settings["webhook_url"]),
         "webhook_record_types": list(settings["webhook_record_types"]),
     }
+    # Cluster: shared throttle store and tsa-daemon endpoints, as decided by
+    # the last cluster evaluation (configure-module, health check). KumoMTA
+    # reads both in its init event only. Absent for a standalone instance
+    # without TSA: its policy does not change.
+    cluster = read_cluster_state()
+    if cluster.get("mode") == "shared" and cluster.get("redis"):
+        store = cluster["redis"]
+        nodes = list(store["nodes"])
+        init["redis"] = {"node": nodes[0] if len(nodes) == 1 else nodes,
+                         "cluster": bool(store.get("cluster"))}
+        if store.get("username"):
+            init["redis"]["username"] = store["username"]
+    if cluster.get("tsa_publish"):
+        init["tsa"] = {"publish": list(cluster["tsa_publish"]),
+                       "subscribe": list(cluster.get("tsa_subscribe") or [])}
+    return init
+
+
+def render_tsa_init(settings, template_dir):
+    """Policy of tsa-daemon, or None when this instance runs none. A
+    clustered daemon listens on the cluster VPN address and trusts the
+    cluster network, so peers joining or leaving need no restart of it:
+    kumod sends no credentials to tsa-daemon, the trust is the source
+    address, and NS8 accepts the cluster network in the trusted zone."""
+    state = read_cluster_state()
+    if not state.get("tsa_listen"):
+        return None
+    trusted = ["127.0.0.1", "::1"]
+    if clustered(settings):
+        cnet, address = cluster_info()
+        if cnet:
+            trusted.append(normalize_network(cnet))
+        elif address:
+            trusted.append(address)
+    with open(os.path.join(template_dir, "tsa_init.lua")) as fp:
+        template = fp.read()
+    generated = f"local TSA = {lua_value({'listen': state['tsa_listen'], 'trusted_hosts': trusted})}\n"
+    return template.replace("--@@GENERATED@@", generated)
 
 
 def render(settings, template_path=None):
@@ -944,6 +1466,14 @@ def render(settings, template_path=None):
         "webhook_token": keysource(settings, "webhook", "webhook_token"),
         "webhook_signing_secret": keysource(settings, "webhook_signing", "webhook_signing_secret"),
     }
+    if "redis" in init:
+        # Password of the throttle store: a local 0600 file; for a manual
+        # store with OpenBao on, the shared secret <path>/cluster_redis
+        if settings["cluster_store"] == "manual" and not read_secret(CLUSTER_PASSWORD) \
+                and settings["vault_enabled"] and settings["cluster_redis_password_set"]:
+            keys["cluster_redis_password"] = keysource(settings, "cluster_redis", CLUSTER_PASSWORD)
+        elif read_secret(CLUSTER_PASSWORD):
+            keys["cluster_redis_password"] = f"{C_SECRETS}/{CLUSTER_PASSWORD}"
     generated = (
         "-- Settings read only at startup (a change restarts kumod)\n"
         f"local INIT = {lua_value(init)}\n\n"
@@ -953,6 +1483,9 @@ def render(settings, template_path=None):
         f"local KEYS = {lua_value(keys)}\n"
     )
     files = {"init.lua": template.replace("--@@GENERATED@@", generated)}
+    tsa_init = render_tsa_init(settings, os.path.dirname(template_path))
+    if tsa_init:
+        files["tsa_init.lua"] = tsa_init
     with open(os.path.join(os.path.dirname(template_path), "acl.toml")) as fp:
         acl = fp.read()
     # HTTP injection by the integration credentials with the inject scope
@@ -1075,10 +1608,14 @@ def write_config(settings, template_path=None, stamp=True):
     for name, content in files.items():
         changed |= write_file(os.path.join(CONFIG_DIR, name), content, 0o644)
     # Settings read only at startup, the environment of kumod included
-    digest = hashlib.sha256(json.dumps({
+    stamped = {
         "init": init_settings(settings),
         "openbao": read_openbao_env() if settings["vault_enabled"] else {},
-    }, sort_keys=True).encode()).hexdigest()
+    }
+    if clustered(settings):
+        # KUMO_NODE_ID of the environment follows the cluster mode
+        stamped["clustered"] = True
+    digest = hashlib.sha256(json.dumps(stamped, sort_keys=True).encode()).hexdigest()
     try:
         with open(RESTART_STAMP) as fp:
             restart = fp.read().strip() != digest

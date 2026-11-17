@@ -15,4 +15,6 @@ systemctl --user try-restart kumomta.service kumomta-api.service
 if systemctl --user -q is-enabled kumomta.service; then
     systemctl --user enable --now kumomta-logs-cleanup.timer kumomta-api.service
 fi
+# Cluster units of a clustered or TSA instance (no-op when standalone)
+runagent python3 -c 'import kumomta_ns8 as k; k.apply_cluster_services(k.load_settings(), k.read_cluster_state())' || :
 rm -f .restart-required .reload-required

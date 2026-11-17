@@ -153,9 +153,16 @@ end
 local get_inbound_domain = listener_domains:setup { POLICY .. '/listener_domains.toml' }
 sources:setup { POLICY .. '/sources.toml' }
 
+-- Traffic shaping, with the automation daemons (tsa-daemon) when INIT.tsa
+-- lists them: the log records go to every daemon of the cluster, the
+-- shaping overrides come from the subscribed one. The lists are read at
+-- startup only (configure_log_hook happens in the init event), so a peer
+-- joining or leaving restarts kumod; docs/cluster.md.
 local shaper = shaping:setup_with_automation {
   no_default_files = false,
   extra_files = { POLICY .. '/shaping.toml' },
+  publish = INIT.tsa and INIT.tsa.publish or nil,
+  subscribe = INIT.tsa and INIT.tsa.subscribe or nil,
 }
 
 if INIT.webhook then
@@ -224,6 +231,30 @@ kumo.on('init', function()
     name = 'meta',
     path = '/var/spool/kumomta/meta',
   }
+
+  -- Shared throttles and connection limits of the cluster. KumoMTA pings
+  -- the store here and does not start if it does not answer: the module
+  -- checks it first (ExecStartPre) and renders local throttles instead.
+  if INIT.redis then
+    local params = {
+      node = INIT.redis.node,
+      cluster = INIT.redis.cluster,
+      connect_timeout = '5 seconds',
+      response_timeout = '3 seconds',
+      wait_timeout = '5 seconds',
+    }
+    if INIT.redis.username then
+      params.username = INIT.redis.username
+    end
+    if KEYS.cluster_redis_password then
+      params.password = kumo.secrets.load(KEYS.cluster_redis_password)
+    end
+    kumo.configure_redis_throttles(params)
+  end
+
+  if INIT.tsa then
+    shaper.setup_publish()
+  end
 
   kumo.configure_local_logs {
     log_dir = '/var/log/kumomta',
@@ -452,10 +483,27 @@ kumo.on('ns8_sink', function(domain, tenant, campaign)
   return connection
 end)
 
+kumo.on('ns8_discard', function(domain, tenant, campaign)
+  local connection = {}
+  function connection:send(message)
+    return 'ns8-kumomta: log record of a former tsa-daemon peer discarded'
+  end
+  return connection
+end)
+
 -- Scheduled queues: retention, inbound routes, smarthost. The queue
 -- configuration follows the configuration epoch, so a change applies to
 -- the existing queues at once.
 kumo.on('get_queue_config', function(domain, tenant, campaign, routing_domain)
+  -- Log records queued for the tsa-daemon of a peer that left the cluster:
+  -- the shaping helper no longer owns that queue, discard the records
+  -- rather than resolving "<url>.tsa.kumomta" as a mail domain
+  if string.sub(domain, -12) == '.tsa.kumomta' then
+    return kumo.make_queue_config {
+      protocol = { custom_lua = { constructor = 'ns8_discard' } },
+      max_age = '1 hour',
+    }
+  end
   local q = policy_data('queues.toml')
   local default = q.default or {}
   local params = {

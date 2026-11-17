@@ -390,6 +390,59 @@
             "type": "string",
             "maxLength": 253,
             "description": "Return path, bounce and feedback-loop domain handled by this MTA, empty to disable"
+        },
+        "cluster_store": {
+            "type": "string",
+            "enum": [
+                "none",
+                "valkey",
+                "manual"
+            ],
+            "description": "Shared throttle store of a multi-node cluster: none (standalone), valkey (an ns8-valkey instance) or manual (any Redis or Valkey). See docs/cluster.md"
+        },
+        "cluster_valkey": {
+            "type": "string",
+            "maxLength": 64,
+            "pattern": "^([a-z][a-z0-9-]*[0-9]+)?$",
+            "description": "Module ID of the ns8-valkey instance, with cluster_store valkey"
+        },
+        "cluster_redis_nodes": {
+            "type": "array",
+            "maxItems": 16,
+            "items": {
+                "type": "string",
+                "maxLength": 255
+            },
+            "description": "Manual store: redis:// or rediss:// URLs without credentials. More than one URL means a Redis Cluster"
+        },
+        "cluster_redis_username": {
+            "type": "string",
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9._@+-]*$",
+            "description": "Manual store: ACL user name, empty for the default user"
+        },
+        "cluster_redis_password": {
+            "type": "string",
+            "maxLength": 512,
+            "description": "Manual store: password (write only). A local 0600 file, or OpenBao <path>/cluster_redis when OpenBao is on"
+        },
+        "cluster_redis_password_clear": {
+            "type": "boolean",
+            "description": "Manual store: remove the password"
+        },
+        "cluster_redis_cluster": {
+            "type": "boolean",
+            "description": "Manual store: use the Redis Cluster protocol with a single URL"
+        },
+        "cluster_join": {
+            "type": "string",
+            "maxLength": 64,
+            "pattern": "^([a-z][a-z0-9-]*[0-9]+)?$",
+            "description": "Copy the cluster settings (and the manual store password) of this kumomta instance, through its reveal-cluster-settings action"
+        },
+        "tsa_enabled": {
+            "type": "boolean",
+            "description": "Run the traffic shaping automation daemon (tsa-daemon). Clustered: it listens on the cluster VPN address and receives the log records of every peer of the same store"
         }
     },
     "additionalProperties": false

@@ -47,11 +47,18 @@ buildah add "${container}" ui/dist /ui
 #   net.ipv4.ip_unprivileged_port_start=23), like ns8-mail
 # - two TCP ports on 127.0.0.1: the KumoMTA HTTP API, and the domain
 #   management API of the integrations (kumomta-api)
+# - a third TCP port for tsa-daemon (traffic shaping automation): on
+#   127.0.0.1, or on the cluster VPN address when clustered
 # - node:fwadm opens the SMTP ports, traefik@node:fulladm gives the TLS
-#   certificate of the host name and the optional metrics route
+#   certificate of the host name and the optional metrics route,
+#   node:portsadm allocates the tsa-daemon port of an upgraded install
+# - multi-node cluster (docs/cluster.md): kumomta@any:clusterpeer lets the
+#   instances copy each other's cluster settings (reveal-cluster-settings),
+#   valkey@any:valkeyclient gets client credentials from ns8-valkey
+#   (grant-client)
 buildah config --entrypoint=/ \
-    --label="org.nethserver.authorizations=traefik@node:fulladm node:fwadm" \
-    --label="org.nethserver.tcp-ports-demand=2" \
+    --label="org.nethserver.authorizations=traefik@node:fulladm node:fwadm,portsadm kumomta@any:clusterpeer valkey@any:valkeyclient" \
+    --label="org.nethserver.tcp-ports-demand=3" \
     --label="org.nethserver.rootfull=0" \
     --label="org.nethserver.min-core=3.20.1" \
     --label="org.nethserver.volumes=kumomta-spool" \

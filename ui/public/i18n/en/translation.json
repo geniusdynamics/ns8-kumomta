@@ -105,7 +105,8 @@
     "add-domain": "Add sending domain",
     "remove-domain": "Remove sending domain",
     "validate-domain": "Check DNS of sending domain",
-    "list-domains": "List sending domains"
+    "list-domains": "List sending domains",
+    "reveal-cluster-settings": "Copy the cluster settings"
   },
   "error": {
     "error": "Error",
@@ -310,11 +311,21 @@
     "domain_exists": "The domain already exists",
     "integration_not_found": "No such integration",
     "invalid_selector": "Invalid selector",
-    "invalid_private_key": "Not a PEM private key"
+    "invalid_private_key": "Not a PEM private key",
+    "not_a_kumomta_instance": "Not another KumoMTA instance of this cluster",
+    "valkey_not_found": "No Valkey instance with this name publishes an endpoint",
+    "invalid_redis_url": "Use redis://host:port or rediss://host:port, without user name or password",
+    "no_cluster_address": "This node has no cluster VPN address",
+    "cluster_join_failed": "The other instance did not hand over its cluster settings: is it clustered, and is this instance authorized?",
+    "tsa_port_unavailable": "Cannot allocate a TCP port for the automation daemon",
+    "not_clustered": "That instance is not clustered"
   },
   "warnings": {
     "sink_mode_title": "Sink mode is on: no mail is delivered",
-    "sink_mode_description": "KumoMTA accepts and discards every outbound message (testing mode). Turn it off in Settings to deliver mail again"
+    "sink_mode_description": "KumoMTA accepts and discards every outbound message (testing mode). Turn it off in Settings to deliver mail again",
+    "cluster_degraded_title": "Cluster degraded: local throttles",
+    "cluster_degraded_description": "The shared throttle store of the cluster is not available. Throttles and connection limits are local to this instance until it answers again; mail is still sent.",
+    "cluster_open": "Open cluster settings"
   },
   "integrations": {
     "title": "Integrations",
@@ -349,5 +360,53 @@
     "copy_password_now_description": "It is shown only here, before saving: the module keeps only a hash",
     "add_integration": "Add integration",
     "saving": "Saving integrations"
+  },
+  "cluster": {
+    "title": "Cluster",
+    "description": "Several KumoMTA instances, one per node, can send as one cluster: with a shared throttle store, the throttles, connection limits and tenant rates are global, and the traffic shaping automation of every instance sees the responses of all of them. Each instance keeps its own queue (spool). Leave the store on None for a single instance: nothing changes.",
+    "store_choice": "Shared throttle store",
+    "choice_none": "None (standalone)",
+    "choice_none_description": "Throttles and connection limits are local to this instance. The default.",
+    "choice_join": "Join another KumoMTA instance",
+    "choice_join_description": "Copy the store settings of a clustered instance (and its store password, if any). The simplest way to add a node.",
+    "choice_valkey": "Valkey instance of this cluster",
+    "choice_valkey_description": "An ns8-valkey application. This instance gets its own credentials from it.",
+    "choice_manual": "Other Redis or Valkey",
+    "choice_manual_description": "A store you run yourself: a single node, or a Redis Cluster for high availability. KumoMTA does not support Redis Sentinel.",
+    "join_peer": "KumoMTA instance",
+    "choose": "Choose",
+    "valkey_instance": "Valkey instance",
+    "no_valkey_title": "No Valkey instance found",
+    "no_valkey_description": "Install ns8-valkey in this cluster first, or use another Redis or Valkey.",
+    "redis_nodes": "Store URLs",
+    "redis_nodes_helper": "One per line: redis://host:port, or rediss://host:port for TLS. Several URLs are the nodes of a Redis Cluster. No credentials here.",
+    "redis_cluster": "Redis Cluster protocol",
+    "redis_cluster_tooltip": "Turn on when a single URL points to a Redis Cluster. With several URLs it is always on.",
+    "redis_username": "User name",
+    "redis_username_helper": "ACL user, empty for the default user",
+    "redis_password": "Password",
+    "redis_password_helper": "Stored in a file readable only by this module.",
+    "redis_password_openbao_helper": "Stored in OpenBao (<path>/cluster_redis), shared by the instances that use the same OpenBao path.",
+    "tsa_title": "Traffic shaping automation",
+    "tsa_enabled": "Run the automation daemon (tsa-daemon)",
+    "tsa_tooltip": "Adjusts the traffic shaping from the responses of the mailbox providers, with the KumoMTA automation rules. In a cluster it listens on the cluster VPN address and receives the log records of every instance of the same store.",
+    "join_notice_title": "Adding a node",
+    "join_notice_description": "Saving restarts KumoMTA on this instance, and on the instances of the same store that run the automation daemon. Spread inbound mail with several MX records or a load balancer.",
+    "saving": "Saving the cluster settings",
+    "status_title": "Status",
+    "throttles": "Throttles",
+    "store": "Store",
+    "tsa_listen": "Automation daemon",
+    "tsa_peers": "Daemons of the other instances",
+    "peers": "Instances of the same store",
+    "none": "none",
+    "node": "node",
+    "mode_standalone": "Local (standalone)",
+    "mode_shared": "Shared",
+    "mode_local": "Local (degraded)",
+    "reason_store_not_found": "The Valkey instance {store} does not exist or publishes no endpoint.",
+    "reason_credentials_unavailable": "No credentials for the store {store}: check that this instance is authorized, then save again.",
+    "reason_store_unreachable": "The store {store} does not answer. This instance goes back to it automatically.",
+    "reason_no_cluster_address": "This node has no cluster VPN address."
   }
 }

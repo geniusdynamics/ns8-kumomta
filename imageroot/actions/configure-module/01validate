@@ -236,6 +236,36 @@ if settings["bounce_domain"] and not kumo.HOSTNAME_RE.match(settings["bounce_dom
 if data.get("webhook_signing_secret") and len(data["webhook_signing_secret"]) < 16:
     error("webhook_signing_secret", "", "password_too_short")
 
+# Multi-node cluster: shared throttle store and tsa-daemon
+if data.get("cluster_join"):
+    peer = data["cluster_join"]
+    try:
+        peers = kumo.kumomta_modules()
+    except Exception:
+        peers = {}
+    if peer == os.environ.get("MODULE_ID") or peer not in peers:
+        error("cluster_join", peer, "not_a_kumomta_instance")
+elif settings["cluster_store"] == "valkey":
+    if not settings["cluster_valkey"]:
+        error("cluster_valkey", "", "required")
+    elif settings["cluster_valkey"] != current["cluster_valkey"]:
+        try:
+            known_valkey = kumo.service_records(kumo.VALKEY_SERVICE)
+        except Exception:
+            known_valkey = {}
+        if settings["cluster_valkey"] not in known_valkey:
+            error("cluster_valkey", settings["cluster_valkey"], "valkey_not_found")
+elif settings["cluster_store"] == "manual":
+    if not settings["cluster_redis_nodes"]:
+        error("cluster_redis_nodes", "", "required")
+    for url in settings["cluster_redis_nodes"]:
+        if not kumo.REDIS_URL_RE.match(url):
+            error("cluster_redis_nodes", url, "invalid_redis_url")
+if settings["cluster_store"] == "valkey" and not kumo.clustered(current):
+    _, vpn_address = kumo.cluster_info()
+    if not vpn_address:
+        error("cluster_store", settings["cluster_store"], "no_cluster_address")
+
 if errors:
     agent.set_status('validation-failed')
     json.dump(errors, fp=sys.stdout)

@@ -10,6 +10,7 @@ Vault KV version 2 store instead of local files.
 | DKIM private key | `state/dkim/<domain>/<selector>.key` (0600) | `<mount>/<path>/dkim/<domain>/<selector>` |
 | Smarthost password | `state/secrets/smarthost_password` (0600) | `<mount>/<path>/smarthost` |
 | Webhook bearer token | `state/secrets/webhook_token` (0600) | `<mount>/<path>/webhook` |
+| Password of a manual cluster throttle store | `state/secrets/cluster_redis_password` (0600) | `<mount>/<path>/cluster_redis`, shared by the instances using the same path ([cluster.md](cluster.md)) |
 
 Each OpenBao secret holds the value in the field named by `vault_key`
 (`key` when empty). `VAULT_ADDR` and `VAULT_TOKEN` are stored in

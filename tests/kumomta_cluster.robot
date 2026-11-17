@@ -118,7 +118,7 @@ Check if an instance uses a manual store with tsa-daemon
     Should Be Equal    ${output}    600
     ${output}  ${rc} =    In module    ${A}    grep -rl ${STORE_PASS} kumomta settings.json environment cluster
     Should Not Be Equal As Integers    ${rc}  0
-    ${output}  ${rc} =    In module    ${A}    grep -c 'node = "redis://${VPN_ADDR}:${VALKEY_PORT}/"' kumomta/init.lua
+    ${output}  ${rc} =    In module    ${A}    grep -c -F 'node = "redis://${VPN_ADDR}:${VALKEY_PORT}"' kumomta/init.lua
     Should Be Equal    ${output}    1
     # tsa-daemon answers on the cluster VPN address only
     ${output} =    Execute Command    curl -s -o /dev/null -w '\%{http_code}' http://${VPN_ADDR}:${config}[tsa_port]/get_config_v1/shaping.toml

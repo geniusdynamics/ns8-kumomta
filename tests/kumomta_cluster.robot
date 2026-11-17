@@ -211,7 +211,7 @@ Check if each sending IP gets its own limits in the shared store
     Should Contain    ${output}    address_not_local
     ${address} =    Execute Command    ip -4 -o route get 192.0.2.1 | grep -o 'src [0-9.]*' | cut -d' ' -f2
     ${source} =    Evaluate    'ip-' + '${address}'.replace('.', '-')
-    ${result} =    Run on    ${A}    configure-module    {"sending_ips":[{"address":"${address}","weight":1,"per_minute":1000,"per_hour":0,"per_day":0,"max_connections":20,"providers":[{"provider":"google","per_minute":200,"per_hour":0,"per_day":0,"max_connections":5},{"provider":"domain","match":"example.org","per_minute":0,"per_hour":0,"per_day":7,"max_connections":0}]}]}
+    ${result} =    Run on    ${A}    configure-module    {"sending_ips":[{"address":"${address}","weight":1,"per_minute":1000,"per_hour":0,"per_day":50,"max_connections":20,"providers":[{"provider":"google","per_minute":200,"per_hour":0,"per_day":0,"max_connections":5},{"provider":"domain","match":"example.org","per_minute":0,"per_hour":0,"per_day":7,"max_connections":0}]}]}
     ${config} =    Configuration of    ${A}
     Should Be Equal    ${config}[sending_ips][0][address]    ${address}
     ${output}  ${rc} =    In module    ${A}    grep -c -F '"source_address" = "${address}"' kumomta/sources.toml
@@ -225,8 +225,9 @@ Check if each sending IP gets its own limits in the shared store
     ...    return_rc=True
     Should Be Equal As Integers    ${rc}  0    ${output}
     # The overall and the per-destination limits of the IP are named
-    # throttles in the shared store
-    Wait Until Keyword Succeeds    3 min    10 sec    Store has per-IP keys    ns8-${source}-min
+    # throttles in the shared store. A throttle key lives one emission
+    # interval: the per-day rates stay visible, 1000/min would expire in 60 ms
+    Wait Until Keyword Succeeds    3 min    10 sec    Store has per-IP keys    ns8-${source}-d
     Wait Until Keyword Succeeds    1 min    10 sec    Store has per-IP keys    ns8-${source}-ns8-domain-example-org-d
 
 Check if a DKIM key is imported from a peer, never regenerated

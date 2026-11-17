@@ -28,6 +28,14 @@ its administration interface.
 - live views: queue summary, top destinations, delivery statistics, recent
   bounces and deliveries
 - optional Prometheus metrics route through Traefik, behind authentication
+- **sending IPs** with overall and per-provider limits per IP (per minute,
+  hour, day, connections), from KumoMTA's egress sources and named
+  throttles
+- optional **multi-node cluster**: shared throttles and connection limits
+  in a Valkey or Redis store (ns8-valkey, or your own, Redis Cluster
+  included), and the traffic shaping automation daemon (tsa-daemon) fed
+  by every instance; local throttles with a warning when the store is
+  down
 
 ## Documentation
 
@@ -40,6 +48,10 @@ its administration interface.
   with curl examples
 - [docs/sink-mode.md](docs/sink-mode.md): sink mode for testing
 - [docs/openbao.md](docs/openbao.md): OpenBao/Vault secrets, turning OpenBao off
+- [docs/cluster.md](docs/cluster.md): multi-node cluster, shared throttle
+  store, traffic shaping automation, DKIM keys, failure modes
+- [docs/sending-ips.md](docs/sending-ips.md): sending IPs, overall and
+  per-provider limits per IP
 
 ## Install
 
@@ -101,8 +113,11 @@ Other actions:
 | `remove-domain` | admin | remove a sending domain and its local key |
 | `list-openbao-only-secrets` | reader | secrets that exist only in OpenBao, and whether the token reads them (no values) |
 | `copy-openbao-to-local` | admin | copy those secrets to local 0600 files before turning OpenBao off |
+| `reveal-dkim-key` | clusterpeer | DKIM key of a domain, for another kumomta instance of the cluster |
+| `reveal-cluster-settings` | clusterpeer | cluster store settings and password, for another kumomta instance joining the cluster |
 
-`configure-module` returns `{"warnings": [...]}`: `sink_mode_enabled`
+`configure-module` returns `{"warnings": [...]}`: `cluster_degraded` while
+a clustered instance uses local throttles, `sink_mode_enabled`
 while sink mode is on, `openbao_items_unavailable` (with the item names)
 when OpenBao is turned off while secrets exist only there.
 
@@ -200,12 +215,10 @@ secrets) and renders the KumoMTA policy in `state/kumomta`, mounted on
 The data files are read through `kumo.memoize` with
 `invalidate_with_epoch`. After a change the module bumps the KumoMTA
 configuration epoch (`POST /api/admin/bump-config-epoch`): the new settings
-apply to the next sessions and queues without dropping connections or
-restarting kumod. Only the settings of the `init` event (listener ports,
-host name, message size, webhook on/off) and the OpenBao environment need a
-restart; the module tracks them in a hash and restarts kumod only when they
-change. The unit reports started only once the API and every listener
-answer with a 220 banner.
+apply to the next sessions and queues. Changes to the `init` settings,
+the OpenBao environment or the [sending IP pool](docs/sending-ips.md)
+restart kumod. The module tracks these settings in a hash. The unit reports
+ready once the HTTP API responds and the SMTP listeners return a 220 banner.
 
 ### TLS
 
@@ -300,9 +313,22 @@ off.
 `ghcr.io/kumocorp/kumomta`, pinned to the newest stable release. KumoMTA
 publishes dated stable releases (`2026.09.29-b90d8bc1`) matching its
 GitHub releases; `latest`, `main` and `dev` are floating and are not used.
-`renovate.json` compares these tags with a regex versioning. No Redis: no
-implemented feature needs it (the traffic shaping automation daemon and
-shared throttles are not configured).
+`renovate.json` compares these tags with a regex versioning. The module
+ships no Redis: a cluster uses an external store (ns8-valkey or your own),
+and tsa-daemon comes from the same KumoMTA image.
+
+### Multi-node cluster
+
+Optional, off by default. Every instance is a peer: a shared Valkey or
+Redis store makes throttles and connection limits global, and each
+instance can run tsa-daemon (`kumomta-tsa.service`, third TCP port, on the
+cluster VPN address). Peers publish `module/<id>/srv/tcp/kumomta-cluster`
+(no secrets) and the `kumomta-cluster-changed` event; ns8-valkey
+credentials come from its `grant-client` action (`valkey@any:valkeyclient`),
+a joining instance copies the settings of a peer with
+`reveal-cluster-settings` (`kumomta@any:clusterpeer`). A health check
+falls back to local throttles, with a warning, when the store does not
+answer. See [docs/cluster.md](docs/cluster.md).
 
 ## Uninstall
 

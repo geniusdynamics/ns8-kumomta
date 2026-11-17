@@ -1,0 +1,53 @@
+#!/usr/bin/env python3
+
+#
+# Copyright (C) 2026 Genius Dynamics
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+
+# Hand the DKIM private key of a sending domain to another kumomta instance
+# of the cluster (its generate-dkim-key with source "peer"), so that every
+# peer signs with the same key. Role clusterpeer only
+# (kumomta@any:clusterpeer): readers cannot run it. NS8 keeps the output
+# under task/module/<this module>/..., which other modules cannot read; it
+# is never logged.
+
+import json
+import os
+import sys
+import agent
+import kumomta_ns8 as kumo
+
+request = json.load(sys.stdin)
+settings = kumo.load_settings()
+domain = request["domain"].lower()
+selector = request["selector"].lower()
+
+
+def failed(field, value, code):
+    agent.set_status('validation-failed')
+    json.dump([{'field': field, 'parameter': field, 'value': value, 'error': code}], fp=sys.stdout)
+    sys.exit(3)
+
+
+if not kumo.clustered(settings):
+    failed('domain', domain, 'not_clustered')
+entry = kumo.find_domain(settings, domain)
+if not entry or entry["selector"] != selector:
+    failed('domain', domain, 'domain_not_found')
+keyfile, _ = kumo.dkim_paths(domain, selector)
+pem = None
+if os.path.exists(keyfile):
+    with open(keyfile) as fp:
+        pem = fp.read()
+elif settings["vault_enabled"]:
+    try:
+        pem = kumo.read_shared_dkim_key(settings, domain, selector)
+    except RuntimeError as ex:
+        print(agent.SD_ERR + str(ex), file=sys.stderr)
+if not pem:
+    failed('domain', domain, 'key_missing')
+
+print(f"DKIM key of {selector}._domainkey.{domain} handed to {os.environ.get('AGENT_TASK_USER', 'unknown')}",
+      file=sys.stderr)
+json.dump({"domain": domain, "selector": selector, "private_key": pem}, fp=sys.stdout)

@@ -1,0 +1,23 @@
+#!/usr/bin/env python3
+
+#
+# Copyright (C) 2026 Genius Dynamics
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+
+# The Valkey instance of the cluster, or a kumomta peer, was removed: use
+# local throttles at once (with a warning), or drop the daemon of the peer.
+
+import json
+import sys
+import kumomta_ns8 as kumo
+
+event = json.load(sys.stdin)
+settings = kumo.load_settings()
+if not kumo.clustered(settings):
+    sys.exit(0)
+removed = event.get("module") or ""
+# The configured Valkey member: switch to another member of its cluster, or
+# local throttles. A kumomta peer: drop its tsa-daemon.
+if removed == settings["cluster_valkey"] or removed.startswith("kumomta"):
+    kumo.cluster_check(immediate=True)

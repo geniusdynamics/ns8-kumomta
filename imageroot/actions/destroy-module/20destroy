@@ -21,6 +21,19 @@ try:
 except Exception as ex:
     print(agent.SD_WARNING + f"Cannot remove the submission service key: {ex}", file=sys.stderr)
 
+# Leave the cluster: the peers drop this tsa-daemon from their list (the
+# core also publishes module-removed)
+try:
+    import kumomta_ns8 as kumo
+    settings = kumo.load_settings()
+    if settings["cluster_store"] == "valkey" and settings["cluster_valkey"]:
+        kumo.revoke_valkey_client(settings["cluster_valkey"])
+    if kumo.clustered(settings):
+        settings["cluster_store"] = "none"
+        kumo.publish_cluster_record(settings, {}, force_event=True)
+except Exception as ex:
+    print(agent.SD_WARNING + f"Cannot remove the cluster record: {ex}", file=sys.stderr)
+
 traefik_id = agent.resolve_agent_id('traefik@node')
 if traefik_id:
     for suffix in ('-metrics', '-api-inject', '-api'):

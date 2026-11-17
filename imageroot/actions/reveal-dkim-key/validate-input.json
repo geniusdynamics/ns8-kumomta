@@ -1,0 +1,13 @@
+{
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "title": "Reveal a DKIM key to a kumomta peer",
+    "$id": "http://nethserver.org/json-schema/task/input/kumomta/reveal-dkim-key",
+    "description": "Role clusterpeer only: the private key of a sending domain, for another kumomta instance of the cluster",
+    "type": "object",
+    "required": ["domain", "selector"],
+    "additionalProperties": false,
+    "properties": {
+        "domain": {"type": "string", "minLength": 3, "maxLength": 253},
+        "selector": {"type": "string", "pattern": "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$"}
+    }
+}

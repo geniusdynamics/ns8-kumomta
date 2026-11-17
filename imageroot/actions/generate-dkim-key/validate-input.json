@@ -2,13 +2,60 @@
     "$schema": "http://json-schema.org/draft-07/schema#",
     "title": "Generate a DKIM key",
     "$id": "http://nethserver.org/json-schema/task/input/kumomta/generate-dkim-key",
-    "description": "Generate the DKIM key of a sending domain, or move the local key to OpenBao when it is enabled",
-    "examples": [{"domain": "example.org"}, {"domain": "example.org", "rotate": true}],
+    "description": "Install the DKIM key of a sending domain: generate it, use the key at the shared OpenBao path, import a PEM key, or copy the key of a kumomta peer. Clustered, an existing shared key is never replaced",
+    "examples": [
+        {
+            "domain": "example.org"
+        },
+        {
+            "domain": "example.org",
+            "rotate": true
+        },
+        {
+            "domain": "example.org",
+            "source": "shared"
+        },
+        {
+            "domain": "example.org",
+            "source": "peer",
+            "peer": "kumomta1"
+        }
+    ],
     "type": "object",
-    "required": ["domain"],
+    "required": [
+        "domain"
+    ],
     "properties": {
-        "domain": {"type": "string", "minLength": 3, "maxLength": 253},
-        "rotate": {"type": "boolean", "description": "Replace the current key with a new one"}
+        "domain": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 253
+        },
+        "rotate": {
+            "type": "boolean",
+            "description": "Replace the current key with a new one"
+        },
+        "source": {
+            "type": "string",
+            "enum": [
+                "generate",
+                "shared",
+                "import",
+                "peer"
+            ],
+            "description": "generate (default), shared (the key at the OpenBao path), import (private_key) or peer (the key of the kumomta instance peer)"
+        },
+        "private_key": {
+            "type": "string",
+            "maxLength": 16384,
+            "description": "With import: PEM private key. Never returned"
+        },
+        "peer": {
+            "type": "string",
+            "maxLength": 64,
+            "pattern": "^([a-z][a-z0-9-]*[0-9]+)?$",
+            "description": "With peer: module ID of the kumomta instance"
+        }
     },
     "additionalProperties": false
 }

@@ -26,6 +26,7 @@ config["webhook_token_set"] = bool(settings["webhook_token_set"])
 config["metrics_password_set"] = bool(settings["metrics_password_set"])
 config["vault_token_set"] = bool(kumo.read_openbao_env().get("VAULT_TOKEN"))
 config["webhook_signing_secret_set"] = bool(settings["webhook_signing_secret_set"])
+config["cluster_redis_password_set"] = bool(settings["cluster_redis_password_set"])
 hashes = kumo.read_integrations_secrets()
 config["integrations"] = [dict(i, password_set=i["name"] in hashes) for i in settings["integrations"]]
 config["spf_mechanism"] = kumo.spf_mechanism(settings) if settings["hostname"] else ""
@@ -45,8 +46,51 @@ except Exception:
     config["mail_modules"] = []
 config["api_port"] = int(os.environ.get("TCP_PORT", 0))
 
+# Multi-node cluster: status of this peer, the ns8-valkey instances and the
+# kumomta instances it can join (service records, no secrets)
+state = kumo.read_cluster_state()
+config["cluster_status"] = {
+    "mode": state.get("mode") or ("standalone" if not kumo.clustered(settings) else "local"),
+    "reason": state.get("reason") or "",
+    "store": state.get("store_label") or "",
+    "nodes": list((state.get("redis") or {}).get("nodes") or []),
+    "tsa_listen": state.get("tsa_listen") or "",
+    "tsa_peers": [u for u in (state.get("tsa_publish") or []) if u != "http://" + (state.get("tsa_listen") or "")],
+}
+try:
+    tsa_hosts = sorted(kumo.designated_tsa_hosts(kumo.store_identity(settings))) if kumo.clustered(settings) else []
+except Exception:
+    tsa_hosts = []
+config["cluster_status"]["tsa_hosts"] = tsa_hosts
+config["cluster_status"]["tsa_reachable"] = int(state.get("tsa_reachable") or 0)
+config["tsa_port"] = kumo.tsa_port() or 0
+config["provider_presets"] = [{"provider": k, "label": v} for k, v in kumo.PROVIDER_PRESETS.items()]
+try:
+    valkeys = kumo.service_records(kumo.VALKEY_SERVICE)
+except Exception:
+    valkeys = {}
+config["valkey_instances"] = [{"module_id": mid, "ui_name": rec.get("ui_name") or "",
+                               "node": str(rec.get("node") or ""),
+                               "endpoint": f"{rec.get('host', '')}:{rec.get('port', '')}"}
+                              for mid, rec in sorted(valkeys.items())]
+try:
+    peers = kumo.service_records(kumo.CLUSTER_SERVICE)
+    modules = kumo.kumomta_modules()
+except Exception:
+    peers, modules = {}, {}
+identity = kumo.store_identity(settings)
+config["cluster_peers"] = [{"module_id": mid, "node": str(node),
+                            "ui_name": (peers.get(mid) or {}).get("ui_name") or "",
+                            "hostname": (peers.get(mid) or {}).get("hostname", ""),
+                            "clustered": mid in peers,
+                            "same_store": bool(identity) and (peers.get(mid) or {}).get("store") == identity,
+                            "store_type": (peers.get(mid) or {}).get("store_type", ""),
+                            "mode": (peers.get(mid) or {}).get("mode", ""),
+                            "tsa": (peers.get(mid) or {}).get("tsa") == "1"}
+                           for mid, node in sorted(modules.items()) if mid != os.environ.get("MODULE_ID")]
+
 # Conditions the UI shows as a banner on every page
-warnings = []
+warnings = kumo.cluster_warnings(settings, state)
 if settings["sink_enabled"]:
     warnings.append({"id": "sink_mode_enabled",
                      "message": "Sink mode is on: outbound mail is accepted and discarded, nothing is delivered"})

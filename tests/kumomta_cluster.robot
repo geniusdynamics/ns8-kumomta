@@ -4,6 +4,9 @@ Documentation     Multi-node cluster on a single test node: two instances share 
 ...               address) and run tsa-daemon; the second one joins the first
 ...               with cluster_join. Then the store stops: the instances fall back
 ...               to local throttles with a warning and keep accepting mail.
+...               The store user has the ACL of ns8-valkey clients
+...               (+@all -@admin -@dangerous). Last, an instance uses a real
+...               ns8-valkey (one-member Valkey Cluster) through grant-client.
 Library           SSHLibrary
 Library           Collections
 
@@ -13,8 +16,13 @@ ${HOST_B}          mx-b.ns8-ci.test
 ${CI_DOMAIN}       ns8-ci.test
 ${VALKEY_IMAGE}    docker.io/valkey/valkey:9.0.7-alpine
 ${VALKEY_PORT}     16379
-# Test fixture only: the throwaway store of this suite
+# Test fixtures only: the throwaway store of this suite. kumomta logs in
+# as ${ACL_USER}, with the permissions ns8-valkey gives its clients
 ${STORE_PASS}      CiClusterStorePass2026
+${ACL_USER}        ci-kumo
+${ACL_PASS}        CiClusterAclPass2026
+${NS8_VALKEY}      ghcr.io/geniusdynamics/valkey:latest
+${VALKEY_ID}       ${EMPTY}
 ${CHECK}           /root/kumomta_smtp_check.py
 
 *** Keywords ***
@@ -24,6 +32,7 @@ Run on
     ...    return_rc=True
     Should Be Equal As Integers    ${rc}  0    ${action} on ${module} failed: ${output}
     Should Not Contain    ${output}    ${STORE_PASS}
+    Should Not Contain    ${output}    ${ACL_PASS}
     ${result} =    Evaluate    json.loads('''${output}''')    modules=json
     RETURN    ${result}
 
@@ -65,6 +74,17 @@ Peer daemon is listed
     ${config} =    Configuration of    ${module}
     Length Should Be    ${config}[cluster_status][tsa_peers]    ${count}
 
+Start the throwaway store
+    ${output}  ${rc} =    Execute Command
+    ...    podman run -d --rm --name kumomta-ci-valkey --network host ${VALKEY_IMAGE} valkey-server --bind ${VPN_ADDR} --port ${VALKEY_PORT} --requirepass ${STORE_PASS} --save '' --user ${ACL_USER} on '>${ACL_PASS}' '~*' '&*' '+@all' '-@admin' '-@dangerous'
+    ...    return_rc=True
+    Should Be Equal As Integers    ${rc}  0    ${output}
+
+Valkey record is published
+    [Arguments]    ${module}
+    ${output}  ${rc} =    In module    ${module}    python3 -c 'import agent; print(agent.redis_connect(use_replica=True).hget("module/${VALKEY_ID}/srv/tcp/valkey", "host") or "")'
+    Should Not Be Empty    ${output}    no valkey record yet
+
 Store has throttle keys
     ${output} =    Execute Command    podman exec kumomta-ci-valkey valkey-cli -h ${VPN_ADDR} -p ${VALKEY_PORT} --no-auth-warning -a ${STORE_PASS} DBSIZE
     Should Be True    int('${output}'.strip() or 0) > 0    no key in the store yet
@@ -90,10 +110,7 @@ Install two instances and a throwaway store
     Should Be Equal    ${config}[cluster_store]    none
     Should Be Equal    ${config}[cluster_status][mode]    standalone
     Should Be Empty    ${config}[warnings]
-    ${output}  ${rc} =    Execute Command
-    ...    podman run -d --rm --name kumomta-ci-valkey --network host ${VALKEY_IMAGE} valkey-server --bind ${VPN_ADDR} --port ${VALKEY_PORT} --requirepass ${STORE_PASS} --save ''
-    ...    return_rc=True
-    Should Be Equal As Integers    ${rc}  0    ${output}
+    Start the throwaway store
 
 Check if a standalone instance renders no cluster settings
     Skip If    '${VPN_ADDR}' == ''    no cluster VPN address on this node
@@ -104,7 +121,7 @@ Check if a standalone instance renders no cluster settings
 
 Check if an instance uses a manual store with tsa-daemon
     Skip If    '${VPN_ADDR}' == ''    no cluster VPN address on this node
-    ${result} =    Run on    ${A}    configure-module    {"cluster_store":"manual","cluster_redis_nodes":["redis://${VPN_ADDR}:${VALKEY_PORT}"],"cluster_redis_password":"${STORE_PASS}","tsa_enabled":true}
+    ${result} =    Run on    ${A}    configure-module    {"cluster_store":"manual","cluster_redis_nodes":["redis://${VPN_ADDR}:${VALKEY_PORT}"],"cluster_redis_username":"${ACL_USER}","cluster_redis_password":"${ACL_PASS}","tsa_enabled":true}
     ${ids} =    Evaluate    [w['id'] for w in $result['warnings']]
     Should Not Contain    ${ids}    cluster_degraded
     ${config} =    Mode is    ${A}    shared
@@ -116,7 +133,7 @@ Check if an instance uses a manual store with tsa-daemon
     Should Be Equal    ${config}[cluster_status][tsa_listen]    ${VPN_ADDR}:${config}[tsa_port]
     ${output}  ${rc} =    In module    ${A}    stat -c %a secrets/cluster_redis_password
     Should Be Equal    ${output}    600
-    ${output}  ${rc} =    In module    ${A}    grep -rl ${STORE_PASS} kumomta settings.json environment cluster
+    ${output}  ${rc} =    In module    ${A}    grep -rl ${ACL_PASS} kumomta settings.json environment cluster
     Should Not Be Equal As Integers    ${rc}  0
     ${output}  ${rc} =    In module    ${A}    grep -c -F 'node = "redis://${VPN_ADDR}:${VALKEY_PORT}"' kumomta/init.lua
     Should Be Equal    ${output}    1
@@ -129,7 +146,7 @@ Check if an instance uses a manual store with tsa-daemon
     # The peer record holds no secret
     ${output}  ${rc} =    In module    ${A}    python3 -c 'import agent, os; print(agent.redis_connect(use_replica=True).hgetall(os.environ["AGENT_ID"] + "/srv/tcp/kumomta-cluster"))'
     Should Contain    ${output}    'tsa': '1'
-    Should Not Contain    ${output}    ${STORE_PASS}
+    Should Not Contain    ${output}    ${ACL_PASS}
 
 Check if a second instance joins with cluster_join
     Skip If    '${VPN_ADDR}' == ''    no cluster VPN address on this node
@@ -177,10 +194,7 @@ Check if a store outage falls back to local throttles and keeps sending
 
 Check if the instances go back to the shared store
     Skip If    '${VPN_ADDR}' == ''    no cluster VPN address on this node
-    ${output}  ${rc} =    Execute Command
-    ...    podman run -d --rm --name kumomta-ci-valkey --network host ${VALKEY_IMAGE} valkey-server --bind ${VPN_ADDR} --port ${VALKEY_PORT} --requirepass ${STORE_PASS} --save ''
-    ...    return_rc=True
-    Should Be Equal As Integers    ${rc}  0    ${output}
+    Start the throwaway store
     ${config} =    Wait Until Keyword Succeeds    1 min    5 sec    Check and expect    ${B}    shared
     Should Be Empty    ${config}[warnings]
     Wait Until Keyword Succeeds    1 min    5 sec    Check and expect    ${A}    shared
@@ -199,7 +213,47 @@ Check if an instance leaves the cluster
     Should Not Match Regexp    ${output}    (?m)^active$
     Wait Until Keyword Succeeds    2 min    10 sec    Peer daemon is listed    ${A}    0
 
+Check if an instance uses an ns8-valkey instance
+    Skip If    '${VPN_ADDR}' == ''    no cluster VPN address on this node
+    ${output}  ${rc} =    Execute Command    add-module ${NS8_VALKEY} 1
+    ...    return_rc=True
+    Should Be Equal As Integers    ${rc}  0    ${output}
+    &{v} =    Evaluate    ${output}
+    Set Suite Variable    ${VALKEY_ID}    ${v.module_id}
+    # A one-member Valkey Cluster: ha_mode cluster with a single seed
+    ${output}  ${rc} =    Execute Command    api-cli run module/${VALKEY_ID}/configure-module --data '{"role":"initial"}'
+    ...    return_rc=True
+    Should Be Equal As Integers    ${rc}  0    ${output}
+    Wait Until Keyword Succeeds    2 min    5 sec    Valkey record is published    ${B}
+    ${config} =    Configuration of    ${B}
+    ${listed} =    Evaluate    [v['module_id'] for v in $config['valkey_instances']]
+    Should Contain    ${listed}    ${VALKEY_ID}
+    ${result} =    Run on    ${B}    configure-module    {"cluster_store":"valkey","cluster_valkey":"${VALKEY_ID}"}
+    ${config} =    Mode is    ${B}    shared
+    Should Be Empty    ${config}[warnings]
+    Should Not Be True    ${config}[cluster_redis_password_set]
+    ${output}  ${rc} =    In module    ${B}    stat -c %a secrets/cluster_redis_password
+    Should Be Equal    ${output}    600
+    ${output}  ${rc} =    In module    ${B}    grep -c -E '^ +cluster = true,' kumomta/init.lua
+    Should Be Equal    ${output}    1
+    ${output}  ${rc} =    In module    ${B}    grep -c -F 'username = "ns8c-${B}"' kumomta/init.lua
+    Should Be Equal    ${output}    1
+    # The granted password is in no other file (compared on the node, never printed)
+    ${output}  ${rc} =    In module    ${B}    sh -c 'test -s secrets/cluster_redis_password && ! grep -rqF "$(cat secrets/cluster_redis_password)" kumomta settings.json environment cluster'
+    Should Be Equal As Integers    ${rc}  0    ${output}
+    Unit is active    ${B}    kumomta.service
+    ${clients} =    Run on    ${VALKEY_ID}    list-clients
+    ${ids} =    Evaluate    [c['client_id'] for c in $clients['clients']]
+    Should Contain    ${ids}    ${B}
+    # Leaving the store revokes the Valkey user
+    ${result} =    Run on    ${B}    configure-module    {"cluster_store":"none"}
+    Mode is    ${B}    standalone
+    ${clients} =    Run on    ${VALKEY_ID}    list-clients
+    ${ids} =    Evaluate    [c['client_id'] for c in $clients['clients']]
+    Should Not Contain    ${ids}    ${B}
+
 Remove the instances and the store
+    Run Keyword If    '${VALKEY_ID}' != ''    Execute Command    remove-module --no-preserve ${VALKEY_ID}
     ${output}  ${rc} =    Execute Command    remove-module --no-preserve ${A}    return_rc=True
     Should Be Equal As Integers    ${rc}  0    ${output}
     ${output}  ${rc} =    Execute Command    remove-module --no-preserve ${B}    return_rc=True

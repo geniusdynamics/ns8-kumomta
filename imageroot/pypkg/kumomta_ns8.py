@@ -1087,6 +1087,10 @@ def grant_valkey_client(valkey_id):
     write_store_info({
         "valkey": valkey_id,
         "cluster_id": output.get("cluster_id") or "",
+        # seeds and mode as granted, merged with those of the record
+        "seeds": [f"{n['host']}:{int(n['port'])}" for n in (output.get("nodes") or [])
+                  if isinstance(n, dict) and n.get("host") and n.get("port")],
+        "cluster": bool(output.get("cluster")) or output.get("ha_mode") == "cluster",
         "granted_to": os.environ.get("MODULE_ID", ""),
         "username": output.get("username") or "",
         "generation": secrets.token_hex(8),
@@ -1134,14 +1138,20 @@ def resolve_store(settings, fetch):
             info = read_store_info()
         if not read_secret(CLUSTER_PASSWORD) or info.get("valkey") != valkey_id:
             return None, "credentials_unavailable"
+        # Seeds: the record endpoint, its nodes list, and the nodes of the
+        # grant-client output. ha_mode "cluster" (or cluster true) selects
+        # the Valkey Cluster protocol, also with a single seed.
         tls = _truthy(rec.get("tls", ""))
         nodes = [_node_url(rec["host"], rec["port"], tls)]
-        for extra in (rec.get("nodes") or "").split(","):
+        seeds = (rec.get("nodes") or "").split(",") + list(info.get("seeds") or [])
+        for extra in seeds:
             host, _, port = extra.strip().rpartition(":")
             if host and port.isdigit() and _node_url(host.strip("[]"), port, tls) not in nodes:
                 nodes.append(_node_url(host.strip("[]"), port, tls))
+        is_cluster = (rec.get("ha_mode") == "cluster" or _truthy(rec.get("cluster", ""))
+                      or bool(info.get("cluster")) or len(nodes) > 1)
         return {"nodes": nodes, "username": info.get("username") or "",
-                "cluster": _truthy(rec.get("cluster", "")) or len(nodes) > 1,
+                "cluster": is_cluster,
                 "label": valkey_id if rec.get("module_id") == valkey_id
                 else f"{valkey_id} (via {rec.get('module_id')})"}, ""
     nodes = list(settings["cluster_redis_nodes"])

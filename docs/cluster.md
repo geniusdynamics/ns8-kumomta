@@ -120,9 +120,16 @@ instances. The module follows the ns8-valkey consumer contract
   password, so the module calls it only when it has no credentials, when
   the instance changes, or when the credentials are refused, and then
   restarts kumod (it reads the password in its init event only).
-- Endpoints: from the record, `host`/`port` and the `nodes` seed list;
-  `cluster` (`true`) selects the Valkey Cluster protocol, also with a
-  single seed. Client connections run on the cluster VPN without TLS
+- Endpoints: the record `host`/`port`, its `nodes` seed list and the
+  `nodes` of the `grant-client` output are all passed as seeds;
+  `ha_mode` `cluster` (or `cluster` `true`) sets `cluster = true`, also
+  with a single seed.
+- Permissions: the ns8-valkey client user (`+@all -@admin -@dangerous`)
+  covers every command KumoMTA sends: `COMMAND INFO` (redis-cell
+  detection), `EVALSHA`/`EVAL`/`SCRIPT LOAD`, `GET`/`SET`/`TIME` and the
+  sorted set commands inside the scripts, `ZADD`/`ZREM`, `PING`, and
+  `CLUSTER SLOTS` for the cluster client. The CI runs the manual store
+  tests with a user restricted the same way. Client connections run on the cluster VPN without TLS
   (`tls` is `false`): WireGuard encrypts them.
 - Events: `valkey-changed` of the configured instance, or of another member
   of its cluster, makes the module read the record again. When the

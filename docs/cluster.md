@@ -108,18 +108,40 @@ or `local`, `reason`, `store`, `nodes`, `tsa_listen`, `tsa_peers`),
 
 [geniusdynamics/ns8-valkey](https://github.com/geniusdynamics/ns8-valkey)
 publishes `module/<id>/srv/tcp/valkey`; the *Cluster* page lists those
-instances. Each kumomta instance asks the chosen instance for its own
-client credentials with the guarded action `grant-client` (role
-`valkeyclient`, requested by the `valkey@any:valkeyclient` authorization
-of ns8-kumomta). The password is stored in `state/secrets/cluster_redis_password`
-(0600); the user name in `state/cluster/store.json`. The module asks again
-when the instance changes, when the credentials are refused
-(`WRONGPASS`), and on the `valkey-changed` event of that instance.
+instances. The module follows the ns8-valkey consumer contract
+(`docs/integration.md` of ns8-valkey):
 
-Fields read from the record: `host`, `port`, optional `tls` (`1`),
-`cluster` (`1`) and `nodes` (`host:port,host:port`, the other nodes of a
-Valkey cluster). Fields read from the `grant-client` output: `password`,
-optional `username`.
+- Credentials: each kumomta instance calls the guarded action
+  `grant-client` of the chosen instance (role `valkeyclient`, requested
+  by the `valkey@any:valkeyclient` authorization), with no input: the
+  Valkey user is `ns8c-<kumomta module ID>`. The password goes to
+  `state/secrets/cluster_redis_password` (0600); the user name and the
+  `cluster_id` to `state/cluster/store.json`. Every call rotates the
+  password, so the module calls it only when it has no credentials, when
+  the instance changes, or when the credentials are refused, and then
+  restarts kumod (it reads the password in its init event only).
+- Endpoints: from the record, `host`/`port` and the `nodes` seed list;
+  `cluster` (`true`) selects the Valkey Cluster protocol, also with a
+  single seed. Client connections run on the cluster VPN without TLS
+  (`tls` is `false`): WireGuard encrypts them.
+- Events: `valkey-changed` of the configured instance, or of another member
+  of its cluster, makes the module read the record again. When the
+  configured instance is removed (`module-removed`), the module uses
+  another record with the same `cluster_id`: the credentials stay valid.
+- `revoke-client` is called (best effort) when the instance leaves the
+  store, or is removed; ns8-valkey also drops the user on
+  `module-removed`.
+- No `key_prefix`: KumoMTA throttle keys have no configurable prefix.
+- ns8-valkey offers standalone (no failover) and cluster mode (automatic
+  failover with 3 or more members). Sentinel is not offered, as KumoMTA has
+  no Sentinel client.
+
+KumoMTA gets the user name and the password as the `username` and
+`password` parameters of `configure_redis_throttles`, never inside the URL,
+so that the password stays out of the policy files. The KumoMTA
+documentation says these parameters apply to clusters only; the source of
+the pinned release (`crates/mod-redis/src/lib.rs`, `build_client`) applies
+them to a single node too.
 
 ### Other Redis or Valkey
 
@@ -175,8 +197,8 @@ the daemon of a peer that left are discarded instead of being delivered.
 |---|---|---|
 | store unreachable at runtime | kumod cannot get connection leases nor apply throttles: deliveries stall (KumoMTA has no fallback) | the health check (`kumomta-cluster-check.timer`, every minute) renders local throttles and restarts kumod after 2 failed checks; warning `cluster_degraded` on every page; back to the store when it answers |
 | store unreachable when kumod starts | `configure_redis_throttles` pings the store in `init`: kumod would not start | `ExecStartPre` checks the store first and renders local throttles |
-| ns8-valkey instance removed | | `module-removed`: local throttles at once, warning `store_not_found` |
-| credentials refused or revoked | | new `grant-client` request, then local throttles if it fails |
+| ns8-valkey instance removed | | `module-removed`: another member of the same Valkey cluster, else local throttles at once, warning `store_not_found` |
+| credentials refused or revoked | | new `grant-client` request and a restart of kumod, then local throttles if it fails |
 | a tsa-daemon down | its log records queue on every kumod and are retried; the shaping overrides of that daemon are ignored (`remote_load` = Ignore) | nothing: the other daemons keep working; the records of a removed peer are discarded |
 | a node down | its spool (queued messages) stays on that node until it comes back | nothing automatic: see below |
 | node without cluster VPN address | | `cluster_store: valkey` refused; a clustered tsa-daemon does not run |

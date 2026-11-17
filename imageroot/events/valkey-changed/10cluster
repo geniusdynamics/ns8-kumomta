@@ -6,7 +6,8 @@
 #
 
 # The ns8-valkey instance of the cluster changed its endpoint or its
-# clients: check it again, and ask for new credentials if they changed.
+# seed list (or another member of its Valkey cluster changed): check it
+# again. The credentials stay valid (docs/integration.md of ns8-valkey).
 
 import json
 import sys
@@ -14,6 +15,10 @@ import kumomta_ns8 as kumo
 
 event = json.load(sys.stdin)
 settings = kumo.load_settings()
-if settings["cluster_store"] != "valkey" or event.get("module_id") != settings["cluster_valkey"]:
+if settings["cluster_store"] != "valkey":
+    sys.exit(0)
+cluster_id = kumo.read_store_info().get("cluster_id")
+if event.get("module_id") != settings["cluster_valkey"] \
+        and not (cluster_id and event.get("cluster_id") == cluster_id):
     sys.exit(0)
 kumo.cluster_check(immediate=True)

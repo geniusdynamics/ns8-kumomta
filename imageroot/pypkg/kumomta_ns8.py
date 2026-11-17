@@ -935,7 +935,8 @@ CLUSTER_FAILURES_BEFORE_LOCAL = 2         # failed checks before local throttles
 # creates the client credentials (role valkeyclient, authorization
 # valkey@any:valkeyclient in build-images.sh)
 VALKEY_SERVICE = "valkey"
-VALKEY_GRANT_ACTION = "grant-client"
+VALKEY_GRANT_ACTION = "grant-client"     # every call rotates the password
+VALKEY_REVOKE_ACTION = "revoke-client"
 
 CLUSTER_REASONS = {
     "store_not_found": "the Valkey instance {store} does not exist or publishes no endpoint",
@@ -1017,6 +1018,15 @@ def write_store_info(info):
     return write_file(CLUSTER_STORE, json.dumps(info, indent=1, sort_keys=True) + "\n", 0o644)
 
 
+def bump_store_generation():
+    """A new password was stored: kumod read the old one in its init event
+    and must restart (the generation is part of the restart stamp; it is a
+    random tag, not derived from the password)"""
+    info = read_store_info()
+    info["generation"] = secrets.token_hex(8)
+    write_store_info(info)
+
+
 def forget_store_credentials():
     """Drop the password and the user name of the throttle store"""
     changed = remove_secret(CLUSTER_PASSWORD)
@@ -1076,9 +1086,24 @@ def grant_valkey_client(valkey_id):
     write_secret(CLUSTER_PASSWORD, output["password"])
     write_store_info({
         "valkey": valkey_id,
+        "cluster_id": output.get("cluster_id") or "",
         "granted_to": os.environ.get("MODULE_ID", ""),
         "username": output.get("username") or "",
+        "generation": secrets.token_hex(8),
     })
+
+
+def revoke_valkey_client(valkey_id):
+    """Best effort: drop the Valkey user of this instance (ns8-valkey also
+    drops it on module-removed)"""
+    import agent.tasks
+    try:
+        ret = agent.tasks.run(agent_id=f"module/{valkey_id}", action=VALKEY_REVOKE_ACTION, data={},
+                              extra={"isNotificationHidden": True})
+        if ret.get("exit_code") != 0:
+            log(agent.SD_WARNING + f"{VALKEY_REVOKE_ACTION} of {valkey_id} failed (exit code {ret.get('exit_code')})")
+    except Exception as ex:
+        log(agent.SD_WARNING + f"{VALKEY_REVOKE_ACTION} of {valkey_id} failed: {ex}")
 
 
 def resolve_store(settings, fetch):
@@ -1086,14 +1111,20 @@ def resolve_store(settings, fetch):
     store is and how to log in, no secrets. nodes are redis:// URLs."""
     if settings["cluster_store"] == "valkey":
         valkey_id = settings["cluster_valkey"]
+        info = read_store_info()
         try:
-            rec = service_records(VALKEY_SERVICE).get(valkey_id)
+            records = service_records(VALKEY_SERVICE)
         except Exception as ex:
             log(agent.SD_WARNING + f"Cannot read the Valkey service records: {ex}")
-            rec = None
+            records = {}
+        rec = records.get(valkey_id)
+        if not rec and info.get("valkey") == valkey_id and info.get("cluster_id"):
+            # The configured member was removed: another member of the same
+            # Valkey cluster serves the same data with the same credentials
+            rec = next((r for _mid, r in sorted(records.items())
+                        if r.get("cluster_id") == info["cluster_id"] and r.get("host") and r.get("port")), None)
         if not rec or not rec.get("host") or not rec.get("port"):
             return None, "store_not_found"
-        info = read_store_info()
         if fetch and (not read_secret(CLUSTER_PASSWORD) or info.get("valkey") != valkey_id
                       or info.get("granted_to") != os.environ.get("MODULE_ID", "")):
             try:
@@ -1111,7 +1142,8 @@ def resolve_store(settings, fetch):
                 nodes.append(_node_url(host.strip("[]"), port, tls))
         return {"nodes": nodes, "username": info.get("username") or "",
                 "cluster": _truthy(rec.get("cluster", "")) or len(nodes) > 1,
-                "label": valkey_id}, ""
+                "label": valkey_id if rec.get("module_id") == valkey_id
+                else f"{valkey_id} (via {rec.get('module_id')})"}, ""
     nodes = list(settings["cluster_redis_nodes"])
     if not store_password(settings) and settings["cluster_redis_password_set"]:
         return None, "credentials_unavailable"
@@ -1613,8 +1645,10 @@ def write_config(settings, template_path=None, stamp=True):
         "openbao": read_openbao_env() if settings["vault_enabled"] else {},
     }
     if clustered(settings):
-        # KUMO_NODE_ID of the environment follows the cluster mode
+        # KUMO_NODE_ID of the environment follows the cluster mode, and
+        # kumod reads the store password in its init event only
         stamped["clustered"] = True
+        stamped["store_generation"] = read_store_info().get("generation", "")
     digest = hashlib.sha256(json.dumps(stamped, sort_keys=True).encode()).hexdigest()
     try:
         with open(RESTART_STAMP) as fp:

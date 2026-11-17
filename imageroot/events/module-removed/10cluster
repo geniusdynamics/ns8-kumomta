@@ -17,5 +17,7 @@ settings = kumo.load_settings()
 if not kumo.clustered(settings):
     sys.exit(0)
 removed = event.get("module") or ""
+# The configured Valkey member: switch to another member of its cluster, or
+# local throttles. A kumomta peer: drop its tsa-daemon.
 if removed == settings["cluster_valkey"] or removed.startswith("kumomta"):
     kumo.cluster_check(immediate=True)

@@ -26,6 +26,8 @@ except Exception as ex:
 try:
     import kumomta_ns8 as kumo
     settings = kumo.load_settings()
+    if settings["cluster_store"] == "valkey" and settings["cluster_valkey"]:
+        kumo.revoke_valkey_client(settings["cluster_valkey"])
     if kumo.clustered(settings):
         settings["cluster_store"] = "none"
         kumo.publish_cluster_record(settings, {}, force_event=True)

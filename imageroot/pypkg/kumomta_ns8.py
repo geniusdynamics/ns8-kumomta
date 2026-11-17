@@ -1589,8 +1589,7 @@ def keysource(settings, name, local_file):
 
 
 def init_settings(settings):
-    """Settings KumoMTA reads only in its init event: a change needs a
-    restart of kumod. Everything else is reloaded live."""
+    """Settings KumoMTA reads only in its init event."""
     listeners = []
     if settings["inbound_enabled"]:
         listeners.append({"name": "inbound", "listen": f"0.0.0.0:{settings['inbound_port']}"})
@@ -1815,6 +1814,11 @@ def write_config(settings, template_path=None, stamp=True):
         "init": init_settings(settings),
         "openbao": read_openbao_env() if settings["vault_enabled"] else {},
     }
+    # KumoMTA caches resolved pools and sources separately from the policy
+    # epoch. Restart when explicit sources change so existing queues cannot
+    # keep selecting a removed address. Rate limits are in other files.
+    if settings["sending_ips"]:
+        stamped["sources"] = files["sources.toml"]
     if clustered(settings):
         # KUMO_NODE_ID of the environment follows the cluster mode, and
         # kumod reads the store password in its init event only

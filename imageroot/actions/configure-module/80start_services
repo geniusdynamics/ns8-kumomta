@@ -21,7 +21,7 @@ systemctl --user start kumomta-api.service
 runagent python3 -c 'import kumomta_ns8 as k; k.apply_cluster_services(k.load_settings(), k.read_cluster_state())'
 
 if [[ -f .restart-required ]] || ! systemctl --user -q is-active kumomta.service; then
-    # Listeners, HTTP API or environment changed: restart kumod. The unit
+    # Startup settings or egress pool changed: restart kumod. The unit
     # reports started only once the API answers (ExecStartPost)
     systemctl --user restart kumomta.service
     rm -f .restart-required .reload-required

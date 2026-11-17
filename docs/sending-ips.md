@@ -15,6 +15,10 @@ has:
 `0` means no limit. Without any IP on the page, KumoMTA sends from the
 address of the default route, with no per-IP limit, as before.
 
+Changing addresses, EHLO names or weights restarts kumod so active queues
+pick up the new egress pool. Queued messages stay on disk. Rate and
+connection limit edits reload live when the egress pool stays the same.
+
 *Add the large providers* fills in conservative starting points (per IP:
 Gmail 2000/h and 5 connections, Outlook.com 1000/h and 3, Microsoft 365
 2000/h and 5, Yahoo 1000/h and 3, iCloud 500/h and 3). Raise them as the

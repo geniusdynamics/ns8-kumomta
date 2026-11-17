@@ -21,7 +21,7 @@ ${VALKEY_PORT}     16379
 ${STORE_PASS}      CiClusterStorePass2026
 ${ACL_USER}        ci-kumo
 ${ACL_PASS}        CiClusterAclPass2026
-${NS8_VALKEY}      ghcr.io/geniusdynamics/valkey:latest
+${NS8_VALKEY}      ghcr.io/geniusdynamics/valkey:1.0.0
 ${VALKEY_ID}       ${EMPTY}
 ${CHECK}           /root/kumomta_smtp_check.py
 
@@ -88,11 +88,15 @@ Valkey record is published
 Main PID of
     [Arguments]    ${module}
     ${output}  ${rc} =    In module    ${module}    systemctl --user show -p MainPID --value kumomta.service
+    Should Be Equal As Integers    ${rc}  0
+    Should Be True    int($output) > 0
     RETURN    ${output}
 
 Store has per-IP keys
     [Arguments]    ${pattern}
-    ${output} =    Execute Command    podman exec kumomta-ci-valkey valkey-cli -h ${VPN_ADDR} -p ${VALKEY_PORT} --no-auth-warning -a ${STORE_PASS} --scan --pattern '*${pattern}*'
+    ${output}  ${rc} =    Execute Command    podman exec kumomta-ci-valkey valkey-cli -h ${VPN_ADDR} -p ${VALKEY_PORT} --no-auth-warning -a ${STORE_PASS} --scan --pattern '${pattern}:*'
+    ...    return_rc=True
+    Should Be Equal As Integers    ${rc}  0    ${output}
     Should Not Be Empty    ${output}    no ${pattern} key in the store yet
 
 Store has throttle keys
@@ -211,8 +215,11 @@ Check if each sending IP gets its own limits in the shared store
     Should Contain    ${output}    address_not_local
     ${address} =    Execute Command    ip -4 -o route get 192.0.2.1 | grep -o 'src [0-9.]*' | cut -d' ' -f2
     ${source} =    Evaluate    'ip-' + '${address}'.replace('.', '-')
+    ${pid_before} =    Main PID of    ${A}
     ${result} =    Run on    ${A}    configure-module    {"sending_ips":[{"address":"${address}","weight":1,"per_minute":1000,"per_hour":0,"per_day":50,"max_connections":20,"providers":[{"provider":"google","per_minute":200,"per_hour":0,"per_day":0,"max_connections":5},{"provider":"domain","match":"example.org","per_minute":0,"per_hour":0,"per_day":7,"max_connections":0}]}]}
-    ${config} =    Configuration of    ${A}
+    ${pid_after} =    Main PID of    ${A}
+    Should Not Be Equal    ${pid_before}    ${pid_after}    The cached egress pool was not refreshed
+    ${config} =    Mode is    ${A}    shared
     Should Be Equal    ${config}[sending_ips][0][address]    ${address}
     ${output}  ${rc} =    In module    ${A}    grep -c -F '"source_address" = "${address}"' kumomta/sources.toml
     Should Be Equal    ${output}    1

@@ -113,8 +113,9 @@ Other actions:
 | `remove-domain` | admin | remove a sending domain and its local key |
 | `list-openbao-only-secrets` | reader | secrets that exist only in OpenBao, and whether the token reads them (no values) |
 | `copy-openbao-to-local` | admin | copy those secrets to local 0600 files before turning OpenBao off |
-| `reveal-dkim-key` | clusterpeer | DKIM key of a domain, for another kumomta instance of the cluster |
-| `reveal-cluster-settings` | clusterpeer | cluster store settings and password, for another kumomta instance joining the cluster |
+| `set-peer-access` | admin | grant or revoke an installed peer's access to this instance's DKIM keys and cluster settings |
+| `reveal-dkim-key` | clusterpeer with source approval | DKIM key of a configured domain and selector |
+| `reveal-cluster-settings` | clusterpeer with source approval | cluster store settings, including the password of a manual store |
 
 `configure-module` returns `{"warnings": [...]}`: `cluster_degraded` while
 a clustered instance uses local throttles, `sink_mode_enabled`
@@ -325,8 +326,8 @@ instance can run tsa-daemon (`kumomta-tsa.service`, third TCP port, on the
 cluster VPN address). Peers publish `module/<id>/srv/tcp/kumomta-cluster`
 (no secrets) and the `kumomta-cluster-changed` event; ns8-valkey
 credentials come from its `grant-client` action (`valkey@any:valkeyclient`),
-a joining instance copies the settings of a peer with
-`reveal-cluster-settings` (`kumomta@any:clusterpeer`). A health check
+a joining instance copies the settings of a peer after the source
+administrator grants access on the Cluster page. A health check
 falls back to local throttles, with a warning, when the store does not
 answer. See [docs/cluster.md](docs/cluster.md).
 

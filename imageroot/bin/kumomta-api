@@ -178,7 +178,12 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self.error(404, "not_found")
         except kumo.DomainError as ex:
-            code = 409 if ex.code == "domain_exists" else 404 if ex.code == "domain_not_found" else 422
+            if ex.code in ("domain_exists", "local_key_conflict", "shared_key_exists"):
+                code = 409
+            elif ex.code == "domain_not_found":
+                code = 404
+            else:
+                code = 422
             self.error(code, ex.code, ex.value)
         except (ValueError, UnicodeDecodeError) as ex:
             self.error(400, "bad_request", str(ex))

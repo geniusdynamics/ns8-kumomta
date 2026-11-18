@@ -12,9 +12,11 @@
 import json
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from threading import Lock
 
 PORT, TOKEN = int(sys.argv[1]), sys.argv[2]
 STORE = {}
+STORE_LOCK = Lock()
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -43,10 +45,13 @@ class Handler(BaseHTTPRequestHandler):
         if not self._authorized():
             return
         key = self._key()
-        if key is None or key not in STORE:
+        with STORE_LOCK:
+            entry = STORE.get(key)
+        if entry is None:
             self._reply(404, {"errors": []})
             return
-        self._reply(200, {"data": {"data": STORE[key], "metadata": {"version": 1}}})
+        version, data = entry
+        self._reply(200, {"data": {"data": data, "metadata": {"version": version}}})
 
     def do_POST(self):
         if not self._authorized():
@@ -57,8 +62,17 @@ class Handler(BaseHTTPRequestHandler):
             return
         length = int(self.headers.get("Content-Length") or 0)
         body = json.loads(self.rfile.read(length) or b"{}")
-        STORE[key] = body.get("data") or {}
-        self._reply(200, {"data": {"version": 1}})
+        cas = body.get("options", {}).get("cas")
+        with STORE_LOCK:
+            version = STORE.get(key, (0, None))[0]
+            conflict = cas is not None and cas != version
+            if not conflict:
+                version += 1
+                STORE[key] = version, body.get("data") or {}
+        if conflict:
+            self._reply(400, {"errors": ["check-and-set parameter did not match the current version"]})
+        else:
+            self._reply(200, {"data": {"version": version}})
 
     def log_message(self, fmt, *args):
         print(fmt % args, file=sys.stderr)

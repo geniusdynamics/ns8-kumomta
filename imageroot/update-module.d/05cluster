@@ -1,0 +1,26 @@
+#!/usr/bin/env python3
+
+#
+# Copyright (C) 2026 Genius Dynamics
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+
+# Upgrade from a version without multi-node clustering: define the
+# clusterpeer role (create-module does it for new installs). The settings
+# need no migration: the defaults (cluster_store "none", tsa_enabled off)
+# are a standalone instance, and its policy renders exactly as before. The
+# tsa-daemon port is allocated only when TSA is turned on (25cluster).
+#
+# NS8 grants kumomta@any:clusterpeer to the other instances when a module
+# is added or the core is updated; until then an upgraded instance can
+# join a peer with its store settings typed in, instead of cluster_join.
+
+import os
+import sys
+import agent
+
+try:
+    with agent.redis_connect(privileged=True) as prdb:
+        prdb.sadd(f"{os.environ['AGENT_ID']}/roles/clusterpeer", "reveal-cluster-settings", "reveal-dkim-key")
+except Exception as ex:
+    print(agent.SD_WARNING + f"Cannot define the clusterpeer role: {ex}", file=sys.stderr)

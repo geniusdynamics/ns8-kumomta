@@ -5,11 +5,23 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
 
-# Generate (or rotate) the DKIM key of a sending domain and return the DNS
-# TXT record to publish. With OpenBao enabled the private key is written to
-# OpenBao (KV v2, <vault_path>/dkim/<domain>/<selector>) and removed from
-# the state directory: an existing local key is moved there unless
-# "rotate" is set. Only the public key stays on disk.
+# Install the DKIM key of a sending domain and return the DNS TXT record to
+# publish. "source" says where the key comes from:
+#
+#   generate  a new key (default); with "rotate", replace the current one
+#   shared    the key already at the OpenBao path (OpenBao on)
+#   import    the PEM key of "private_key"
+#   peer      the key of the same domain and selector on the kumomta
+#             instance "peer" (its reveal-dkim-key action, role clusterpeer)
+#
+# With OpenBao the private key goes to OpenBao (KV v2,
+# <vault_path>/dkim/<domain>/<selector>) and leaves the state directory; an
+# existing local key is moved there unless "rotate" is set.
+#
+# Clustered (docs/cluster.md): the peers sign with the same key, so a key is
+# imported, never overwritten. A key that already exists at a shared OpenBao
+# path is never replaced, and rotation is refused (rotate with a new
+# selector on every peer). The private key is never part of the output.
 
 import json
 import os
@@ -20,29 +32,74 @@ import kumomta_ns8 as kumo
 request = json.load(sys.stdin)
 settings = kumo.load_settings()
 domain = request["domain"].lower()
+source = request.get("source") or "generate"
+clustered = kumo.clustered(settings)
+
+
+def failed(field, value, code):
+    agent.set_status('validation-failed')
+    json.dump([{'field': field, 'parameter': field, 'value': value, 'error': code}], fp=sys.stdout)
+    sys.exit(3)
+
+
 entry = next((d for d in settings["domains"] if d["domain"] == domain), None)
 if entry is None:
-    agent.set_status('validation-failed')
-    json.dump([{'field': 'domain', 'parameter': 'domain', 'value': domain, 'error': 'domain_not_found'}], fp=sys.stdout)
-    sys.exit(3)
+    failed('domain', domain, 'domain_not_found')
 selector = entry["selector"]
-keyfile, _ = kumo.dkim_paths(domain, selector)
+keyfile, pubfile = kumo.dkim_paths(domain, selector)
 
-if os.path.exists(keyfile) and not request.get("rotate"):
-    with open(keyfile) as fp:
-        pem = fp.read()
-    public = kumo.public_from_private(pem)
-else:
-    pem, public = kumo.generate_dkim_key()
-
+shared = None
 if settings["vault_enabled"]:
     try:
-        kumo.openbao_write(settings, kumo.dkim_vault_path(settings, domain, selector), pem)
+        shared = kumo.read_shared_dkim_key(settings, domain, selector)
     except RuntimeError as ex:
         print(agent.SD_ERR + str(ex), file=sys.stderr)
-        agent.set_status('validation-failed')
-        json.dump([{'field': 'domain', 'parameter': 'domain', 'value': domain, 'error': 'openbao_write_failed'}], fp=sys.stdout)
-        sys.exit(3)
+        failed('domain', domain, 'openbao_read_failed')
+
+if source == "generate":
+    if clustered and request.get("rotate"):
+        failed('rotate', domain, 'cluster_rotation_refused')
+    if clustered and shared is not None:
+        failed('source', domain, 'shared_key_exists')
+    if os.path.exists(keyfile) and not request.get("rotate"):
+        with open(keyfile) as fp:
+            pem = fp.read()
+    else:
+        pem, _ = kumo.generate_dkim_key()
+elif source == "shared":
+    if shared is None:
+        failed('source', domain, 'shared_key_missing')
+    pem = shared
+elif source == "import":
+    pem = request.get("private_key") or ""
+elif source == "peer":
+    peer = request.get("peer") or ""
+    if not clustered or peer == os.environ.get("MODULE_ID") or peer not in kumo.kumomta_modules():
+        failed('peer', peer, 'not_a_kumomta_instance')
+    import agent.tasks
+    ret = agent.tasks.run(agent_id=f"module/{peer}", action="reveal-dkim-key",
+                          data={"domain": domain, "selector": selector},
+                          extra={"isNotificationHidden": True})
+    if ret.get("exit_code") != 0:
+        print(agent.SD_ERR + f"reveal-dkim-key of {peer} failed (exit code {ret.get('exit_code')})", file=sys.stderr)
+        failed('peer', peer, 'peer_key_unavailable')
+    pem = (ret.get("output") or {}).get("private_key") or ""
+
+try:
+    public = kumo.public_from_private(pem)
+except Exception:
+    failed('private_key', '', 'invalid_private_key')
+
+if settings["vault_enabled"]:
+    if shared is not None and kumo.public_from_private(shared) != public:
+        if clustered:
+            failed('source', domain, 'shared_key_exists')
+    if shared is None or kumo.public_from_private(shared) != public:
+        try:
+            kumo.openbao_write(settings, kumo.dkim_vault_path(settings, domain, selector), pem)
+        except RuntimeError as ex:
+            print(agent.SD_ERR + str(ex), file=sys.stderr)
+            failed('domain', domain, 'openbao_write_failed')
     if os.path.exists(keyfile):
         os.unlink(keyfile)
     location = "openbao"

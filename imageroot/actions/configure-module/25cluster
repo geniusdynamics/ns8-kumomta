@@ -1,0 +1,70 @@
+#!/usr/bin/env python3
+
+#
+# Copyright (C) 2026 Genius Dynamics
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+
+# Multi-node cluster (docs/cluster.md): allocate the tsa-daemon port of an
+# upgraded install, get the ns8-valkey credentials, check the shared
+# throttle store and write cluster/state.json, which 30render turns into
+# the policy. An unreachable store gives local throttles and a warning,
+# never a failure: the MTA keeps sending.
+
+import json
+import os
+import sys
+import agent
+import kumomta_ns8 as kumo
+
+settings = kumo.load_settings()
+
+if settings["tsa_enabled"] and not kumo.tsa_port():
+    try:
+        kumo.ensure_tsa_port()
+    except Exception as ex:
+        print(agent.SD_ERR + f"Cannot allocate the tsa-daemon port: {ex}", file=sys.stderr)
+        agent.set_status('validation-failed')
+        json.dump([{'field': 'tsa_enabled', 'parameter': 'tsa_enabled', 'value': True,
+                    'error': 'tsa_port_unavailable'}], fp=sys.stdout)
+        sys.exit(3)
+
+# A stable KumoMTA node id per instance (the nodeid of the log records),
+# instead of a new one at each container start
+if kumo.clustered(settings) and os.environ.get("MODULE_UUID"):
+    agent.set_env("KUMO_NODE_ID", os.environ["MODULE_UUID"])
+else:
+    agent.unset_env("KUMO_NODE_ID")
+agent.dump_env()
+
+state = kumo.evaluate_cluster(settings, fetch=True, immediate=True)
+with kumo.settings_lock():
+    kumo.write_cluster_state(state)
+
+try:
+    with open(kumo.WARNINGS_FILE) as fp:
+        collected = json.load(fp)
+except (FileNotFoundError, ValueError):
+    collected = []
+for warning in kumo.cluster_warnings(settings, state):
+    print(agent.SD_WARNING + warning["message"], file=sys.stderr)
+    collected.append({"id": warning["id"], "items": [warning["reason"]]})
+
+# TSA designation changed: the peers of the store restart kumod once (their
+# list of daemons changes). The last designated host leaving stops the
+# automation of the cluster.
+if kumo.clustered(settings):
+    try:
+        hosts = kumo.designated_tsa_hosts(kumo.store_identity(settings))
+    except Exception:
+        hosts = {}
+    others = sorted(h for h in hosts if h != os.environ.get("MODULE_ID"))
+    if os.path.exists(".tsa-designation-changed"):
+        os.unlink(".tsa-designation-changed")
+        peers = sorted(mid for mid, rec in kumo.service_records(kumo.CLUSTER_SERVICE).items()
+                       if rec.get("store") == kumo.store_identity(settings) and mid != os.environ.get("MODULE_ID"))
+        if peers:
+            collected.append({"id": "tsa_peers_restart", "items": peers})
+        if not settings["tsa_enabled"] and not others:
+            collected.append({"id": "tsa_no_host", "items": []})
+kumo.write_file(kumo.WARNINGS_FILE, json.dumps(collected), 0o600)

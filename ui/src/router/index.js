@@ -12,6 +12,8 @@ import Domains from "../views/Domains.vue";
 import Delivery from "../views/Delivery.vue";
 import OpenBao from "../views/OpenBao.vue";
 import Integrations from "../views/Integrations.vue";
+import Cluster from "../views/Cluster.vue";
+import SendingIps from "../views/SendingIps.vue";
 
 Vue.use(VueRouter);
 
@@ -56,6 +58,16 @@ const routes = [
     path: "/openbao",
     name: "OpenBao",
     component: OpenBao,
+  },
+  {
+    path: "/sending-ips",
+    name: "SendingIps",
+    component: SendingIps,
+  },
+  {
+    path: "/cluster",
+    name: "Cluster",
+    component: Cluster,
   },
   {
     path: "/about",

@@ -41,3 +41,8 @@ with agent.redis_connect(privileged=True) as prdb:
         "node_id": int(os.environ['NODE_ID']),
     }))
     trx.execute()
+
+# Peer record of the multi-node cluster (module/<id>/srv/tcp/kumomta-cluster,
+# no secrets): the peers of the same store publish their log records to
+# its tsa-daemon. The kumomta-cluster-changed event tells them.
+kumo.publish_cluster_record(settings, kumo.read_cluster_state())

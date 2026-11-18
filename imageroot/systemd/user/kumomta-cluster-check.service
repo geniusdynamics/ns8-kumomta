@@ -1,0 +1,22 @@
+#
+# Copyright (C) 2026 Genius Dynamics
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+
+#
+# Health check of a clustered instance: is the shared throttle store
+# answering? kumod stops opening connections while its store fails, so
+# after two failed checks the module renders local throttles and restarts
+# kumod, and goes back to the shared store when it answers again.
+# Membership changes do not wait for this: they come with NS8 events.
+#
+
+[Unit]
+Description=KumoMTA cluster health check
+
+[Service]
+Type=oneshot
+EnvironmentFile=%S/state/environment
+WorkingDirectory=%S/state
+SyslogIdentifier=%N
+ExecStart=runagent kumomta-cluster-check

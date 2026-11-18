@@ -32,6 +32,10 @@ TimeoutStopSec=150
 TimeoutStartSec=300
 ExecStartPre=/bin/rm -f %t/kumomta.pid %t/kumomta.ctr-id
 ExecStartPre=/bin/mkdir -p kumomta secrets dkim tls
+# Clustered: check the shared throttle store before kumod pings it in its
+# init event, and render local throttles if it does not answer. A no-op
+# for a standalone instance; a failure keeps the policy as it is.
+ExecStartPre=-runagent kumomta-cluster-check --prestart
 ExecStart=/usr/bin/podman run \
     --detach \
     --conmon-pidfile=%t/kumomta.pid \
@@ -43,6 +47,7 @@ ExecStart=/usr/bin/podman run \
     --user=999:999 \
     --env=VAULT_ADDR \
     --env=VAULT_TOKEN \
+    --env=KUMO_NODE_ID \
     --volume=./kumomta:/opt/kumomta/etc/policy:ro,z \
     --volume=./secrets:/opt/kumomta/etc/secrets:ro,z \
     --volume=./dkim:/opt/kumomta/etc/dkim:ro,z \

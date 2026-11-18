@@ -1,0 +1,23 @@
+#!/usr/bin/env python3
+
+#
+# Copyright (C) 2026 Genius Dynamics
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+
+# A kumomta peer joined, left or changed its tsa-daemon: refresh the list
+# of daemons this kumod publishes to (kumod restarts if it changed).
+
+import json
+import os
+import sys
+import kumomta_ns8 as kumo
+
+event = json.load(sys.stdin)
+settings = kumo.load_settings()
+if not kumo.clustered(settings) or event.get("module_id") == os.environ.get("MODULE_ID"):
+    sys.exit(0)
+if event.get("store") != kumo.store_identity(settings) and len(kumo.read_cluster_state().get("tsa_publish") or []) < 2:
+    # Another cluster, and no peer daemon in our list that could be leaving
+    sys.exit(0)
+kumo.cluster_check(immediate=True)

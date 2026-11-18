@@ -3,6 +3,8 @@ Library    SSHLibrary
 Library    Collections
 
 *** Variables ***
+${SCENARIO}        install
+${RELEASE_IMAGE}   ghcr.io/geniusdynamics/kumomta:1.0.0
 # Names under the reserved .test TLD: nothing resolves them
 ${TEST_HOST}       mx.ns8-ci.test
 ${TEST_DOMAIN}     ns8-ci.test
@@ -129,7 +131,8 @@ State file
 
 *** Test Cases ***
 Check if kumomta is installed correctly
-    ${output}  ${rc} =    Execute Command    add-module ${IMAGE_URL} 1
+    ${initial_image} =    Set Variable If    $SCENARIO == 'update'    ${RELEASE_IMAGE}    ${IMAGE_URL}
+    ${output}  ${rc} =    Execute Command    add-module ${initial_image} 1
     ...    return_rc=True
     Should Be Equal As Integers    ${rc}  0
     &{output} =    Evaluate    ${output}
@@ -144,6 +147,32 @@ Check if kumomta can be configured
     ${output}  ${rc} =    Execute Command    runagent -m ${module_id} systemctl --user is-active kumomta.service
     ...    return_rc=True
     Should Be Equal    ${output}    active
+
+Check if a populated standalone instance survives the update
+    Skip If    $SCENARIO != 'update'    Fresh installation
+    ${before} =    Get configuration
+    ${hashes_before}  ${rc} =    State file    sha256sum secrets/smtp_users.toml dkim/${TEST_DOMAIN}/ci1.key
+    Should Be Equal As Integers    ${rc}  0    ${hashes_before}
+    Submit    before-update@${DEFER_DOMAIN}
+    Wait Until Keyword Succeeds    2 min    5 sec    Domain is queued    ${DEFER_DOMAIN}
+    ${output}  ${rc} =    Execute Command
+    ...    api-cli run update-module --data '{"force":true,"module_url":"${IMAGE_URL}","instances":["${module_id}"]}'
+    ...    return_rc=True
+    Should Be Equal As Integers    ${rc}  0    ${output}
+    ${image}  ${rc} =    State file    printenv IMAGE_URL
+    Should Be Equal As Integers    ${rc}  0
+    Should Be Equal    ${image}    ${IMAGE_URL}
+    Wait Until Keyword Succeeds    2 min    5 sec    Domain is queued    ${DEFER_DOMAIN}
+    ${after} =    Get configuration
+    FOR    ${field}    IN    hostname    smtp_users    domains    inbound_routes    shaping    retry_interval    max_age
+        Should Be Equal    ${after}[${field}]    ${before}[${field}]
+    END
+    Should Be Equal    ${after}[cluster_store]    none
+    Should Be Equal    ${after}[cluster_status][mode]    standalone
+    Should Not Be True    ${after}[tsa_enabled]
+    ${hashes_after}  ${rc} =    State file    sha256sum secrets/smtp_users.toml dkim/${TEST_DOMAIN}/ci1.key
+    Should Be Equal As Integers    ${rc}  0    ${hashes_after}
+    Should Be Equal    ${hashes_after}    ${hashes_before}
 
 Check if the configuration reads back without secrets
     ${output}  ${rc} =    Execute Command    api-cli run module/${module_id}/get-configuration --data '{}'

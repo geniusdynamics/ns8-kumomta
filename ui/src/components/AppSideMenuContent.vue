@@ -71,6 +71,20 @@
         <span>{{ $t("openbao.title") }}</span>
       </cv-side-nav-link>
       <cv-side-nav-link
+        @click="goToAppPage(instanceName, 'sending-ips')"
+        :class="{ 'current-page': isLinkActive('sending-ips') }"
+      >
+        <template v-slot:nav-icon><Gauge20 /></template>
+        <span>{{ $t("sending_ips.title") }}</span>
+      </cv-side-nav-link>
+      <cv-side-nav-link
+        @click="goToAppPage(instanceName, 'cluster')"
+        :class="{ 'current-page': isLinkActive('cluster') }"
+      >
+        <template v-slot:nav-icon><Network20 /></template>
+        <span>{{ $t("cluster.title") }}</span>
+      </cv-side-nav-link>
+      <cv-side-nav-link
         @click="goToAppPage(instanceName, 'about')"
         :class="{ 'current-page': isLinkActive('about') }"
       >
@@ -91,6 +105,8 @@ import Certificate20 from "@carbon/icons-vue/es/certificate/20";
 import DeliveryTruck20 from "@carbon/icons-vue/es/delivery-truck/20";
 import Locked20 from "@carbon/icons-vue/es/locked/20";
 import Api20 from "@carbon/icons-vue/es/api/20";
+import Network20 from "@carbon/icons-vue/es/network--3/20";
+import Gauge20 from "@carbon/icons-vue/es/meter/20";
 import { mapState } from "vuex";
 import { QueryParamService, UtilService } from "@nethserver/ns8-ui-lib";
 
@@ -106,6 +122,8 @@ export default {
     DeliveryTruck20,
     Locked20,
     Api20,
+    Network20,
+    Gauge20,
   },
   mixins: [QueryParamService, UtilService],
   data() {

@@ -19,6 +19,20 @@
           </cv-column>
         </cv-row>
       </cv-grid>
+      <cv-grid v-if="clusterDegraded" fullWidth class="app-banner">
+        <cv-row>
+          <cv-column>
+            <NsInlineNotification
+              kind="warning"
+              :title="$t('warnings.cluster_degraded_title')"
+              :description="$t('warnings.cluster_degraded_description')"
+              :actionLabel="$t('warnings.cluster_open')"
+              @action="goToAppPage(instanceName, 'cluster')"
+              :showCloseButton="false"
+            />
+          </cv-column>
+        </cv-row>
+      </cv-grid>
       <router-view />
     </cv-content>
   </div>
@@ -42,6 +56,9 @@ export default {
   mixins: [QueryParamService, TaskService, UtilService, ModuleTask],
   computed: {
     ...mapState(["instanceName", "instanceLabel", "core", "configWarnings"]),
+    clusterDegraded() {
+      return this.configWarnings.some((w) => w.id === "cluster_degraded");
+    },
     sinkModeOn() {
       return this.configWarnings.some((w) => w.id === "sink_mode_enabled");
     },

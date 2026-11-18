@@ -1,0 +1,51 @@
+#
+# Copyright (C) 2026 Genius Dynamics
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+
+#
+# KumoMTA traffic shaping automation daemon (tsa-daemon), from the same
+# image as kumod. Enabled by configure-module when tsa_enabled is on.
+# Standalone: it listens on 127.0.0.1. Clustered: on the cluster VPN
+# address, reached by the kumod of every peer through the trusted zone of
+# the NS8 firewall (no port is opened to the public zone).
+#
+# The policy directory is shared with kumod (read only, :z); the daemon
+# keeps its state (tsa.db) on its own volume.
+#
+
+[Unit]
+Description=KumoMTA traffic shaping automation daemon
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Environment=PODMAN_SYSTEMD_UNIT=%n
+EnvironmentFile=%S/state/environment
+WorkingDirectory=%S/state
+Restart=always
+RestartSec=10
+TimeoutStopSec=60
+ExecStartPre=/bin/rm -f %t/kumomta-tsa.pid %t/kumomta-tsa.ctr-id
+ExecStartPre=/usr/bin/test -f kumomta/tsa_init.lua
+ExecStart=/usr/bin/podman run \
+    --detach \
+    --conmon-pidfile=%t/kumomta-tsa.pid \
+    --cidfile=%t/kumomta-tsa.ctr-id \
+    --cgroups=no-conmon \
+    --replace --name=%N \
+    --network=host \
+    --userns=keep-id:uid=999,gid=999 \
+    --user=999:999 \
+    --volume=./kumomta:/opt/kumomta/etc/policy:ro,z \
+    --volume=kumomta-tsa:/var/spool/kumomta:Z \
+    ${KUMOMTA_IMAGE} \
+    /opt/kumomta/sbin/tsa-daemon --policy /opt/kumomta/etc/policy/tsa_init.lua
+ExecStop=/usr/bin/podman stop --ignore --cidfile %t/kumomta-tsa.ctr-id -t 30
+ExecStopPost=/usr/bin/podman rm --ignore -f --cidfile %t/kumomta-tsa.ctr-id
+PIDFile=%t/kumomta-tsa.pid
+Type=forking
+SyslogIdentifier=%N
+
+[Install]
+WantedBy=default.target

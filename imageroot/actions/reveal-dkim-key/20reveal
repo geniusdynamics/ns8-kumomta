@@ -17,11 +17,7 @@ import os
 import sys
 import agent
 import kumomta_ns8 as kumo
-
-request = json.load(sys.stdin)
-settings = kumo.load_settings()
-domain = request["domain"].lower()
-selector = request["selector"].lower()
+from kumomta_peer_access import authorized_peer
 
 
 def failed(field, value, code):
@@ -30,24 +26,30 @@ def failed(field, value, code):
     sys.exit(3)
 
 
-if not kumo.clustered(settings):
-    failed('domain', domain, 'not_clustered')
-entry = kumo.find_domain(settings, domain)
-if not entry or entry["selector"] != selector:
-    failed('domain', domain, 'domain_not_found')
-keyfile, _ = kumo.dkim_paths(domain, selector)
-pem = None
-if os.path.exists(keyfile):
-    with open(keyfile) as fp:
-        pem = fp.read()
-elif settings["vault_enabled"]:
-    try:
-        pem = kumo.read_shared_dkim_key(settings, domain, selector)
-    except RuntimeError as ex:
-        print(agent.SD_ERR + str(ex), file=sys.stderr)
-if not pem:
-    failed('domain', domain, 'key_missing')
+with authorized_peer() as peer:
+    request = json.load(sys.stdin)
+    settings = kumo.load_settings()
+    domain = request["domain"].lower()
+    selector = request["selector"].lower()
+    if not kumo.clustered(settings):
+        failed('domain', domain, 'not_clustered')
+    entry = kumo.find_domain(settings, domain)
+    if not entry or entry["selector"] != selector:
+        failed('domain', domain, 'domain_not_found')
+    keyfile, _ = kumo.dkim_paths(domain, selector)
+    pem = None
+    if os.path.exists(keyfile):
+        with open(keyfile) as fp:
+            pem = fp.read()
+    elif settings["vault_enabled"]:
+        try:
+            pem = kumo.read_shared_dkim_key(settings, domain, selector)
+        except RuntimeError as ex:
+            print(agent.SD_ERR + str(ex), file=sys.stderr)
+    if not pem:
+        failed('domain', domain, 'key_missing')
 
-print(f"DKIM key of {selector}._domainkey.{domain} handed to {os.environ.get('AGENT_TASK_USER', 'unknown')}",
-      file=sys.stderr)
-json.dump({"domain": domain, "selector": selector, "private_key": pem}, fp=sys.stdout)
+    print(f"DKIM key of {selector}._domainkey.{domain} handed to module/{peer}",
+          file=sys.stderr)
+    json.dump({"domain": domain, "selector": selector, "private_key": pem}, fp=sys.stdout)
+    sys.stdout.flush()

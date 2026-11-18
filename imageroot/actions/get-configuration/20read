@@ -13,6 +13,7 @@ import os
 import sys
 import agent
 import kumomta_ns8 as kumo
+from kumomta_peer_access import approved_peers
 
 settings = kumo.load_settings()
 config = {k: settings[k] for k in kumo.DEFAULTS if not k.endswith("_set")}
@@ -78,10 +79,16 @@ try:
     modules = kumo.kumomta_modules()
 except Exception:
     peers, modules = {}, {}
+try:
+    approved = approved_peers()
+except Exception as ex:
+    print(agent.SD_WARNING + f"Cannot read peer approvals: {ex}", file=sys.stderr)
+    approved = set()
 identity = kumo.store_identity(settings)
 config["cluster_peers"] = [{"module_id": mid, "node": str(node),
                             "ui_name": (peers.get(mid) or {}).get("ui_name") or "",
                             "hostname": (peers.get(mid) or {}).get("hostname", ""),
+                            "secret_access": mid in approved,
                             "clustered": mid in peers,
                             "same_store": bool(identity) and (peers.get(mid) or {}).get("store") == identity,
                             "store_type": (peers.get(mid) or {}).get("store_type", ""),

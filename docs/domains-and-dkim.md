@@ -25,9 +25,12 @@ curl -u platform1:$SECRET -H 'Content-Type: application/json' \
 | `tenant` | tenant of the messages from this domain when the credential has none and no `X-Tenant` is set. A credential bound to a tenant can only use its own |
 | `dkim_private_key` | optional PEM private key to import (RSA), instead of generating a 2048-bit RSA key. Never returned |
 
-The module generates the key, stores the private key in a 0600 file (or in
-OpenBao when enabled, see [openbao.md](openbao.md)) and answers `201` with
-the domain and the records to publish. The domain starts as `pending`.
+On a standalone instance the module generates the key and stores it in
+a 0600 file or in OpenBao. In a cluster with shared OpenBao, peers reuse
+the key at the common selector path. In a cluster with local key storage,
+supply the common PEM or an already provisioned key. A successful request
+returns `201` with the domain and DNS records. The domain starts as
+`pending`. [Cluster DKIM setup](cluster.md#dkim-keys-in-a-cluster)
 
 ## DNS records
 
@@ -107,9 +110,12 @@ The local key files are deleted. A key stored in OpenBao is left there.
 
 ## Rotate a key
 
-The `generate-dkim-key` action (admin, "Rotate key" on the Domains page)
+On a standalone instance the `generate-dkim-key` action (admin, "Rotate key" on the Domains page)
 replaces the key of the selector: the published record stops matching at
 once, so publish the new record right away and validate again. The domain
 API has no rotation endpoint yet: a platform rotates by removing the domain
 and adding it again with a new selector (or an imported key), then
 publishing the new record.
+
+For clustered instances, coordinate the switch to a new selector and retain
+the old DNS record for queued messages. [Cluster DKIM setup](cluster.md#dkim-keys-in-a-cluster)

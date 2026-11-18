@@ -91,6 +91,46 @@
         </cv-tile>
       </cv-column>
     </cv-row>
+    <cv-row v-if="peers.length">
+      <cv-column>
+        <cv-tile light class="mg-bottom">
+          <h4 class="mg-bottom-sm">{{ $t("cluster.peer_access") }}</h4>
+          <p class="mg-bottom-sm description">
+            {{ $t("cluster.peer_access_description") }}
+          </p>
+          <ul class="access-list maxwidth">
+            <li v-for="peer in peers" :key="peer.module_id">
+              <span :id="'peer-access-' + peer.module_id">{{
+                peerLabel(peer)
+              }}</span>
+              <NsButton
+                kind="tertiary"
+                size="small"
+                :aria-describedby="'peer-access-' + peer.module_id"
+                :disabled="busy"
+                :loading="loading.peerAccess === peer.module_id"
+                @click="setPeerAccess(peer)"
+              >
+                {{
+                  $t(
+                    peer.secret_access
+                      ? "cluster.revoke_access"
+                      : "cluster.allow_access"
+                  )
+                }}
+              </NsButton>
+            </li>
+          </ul>
+          <NsInlineNotification
+            v-if="error.peerAccess"
+            kind="error"
+            :title="$t('action.set-peer-access')"
+            :description="error.peerAccess"
+            :showCloseButton="false"
+          />
+        </cv-tile>
+      </cv-column>
+    </cv-row>
     <cv-row>
       <cv-column>
         <cv-tile light>
@@ -341,10 +381,15 @@ export default {
       status: { mode: "standalone", reason: "", tsa_peers: [] },
       valkeyInstances: [],
       peers: [],
-      loading: { getConfiguration: false, configureModule: false },
+      loading: {
+        getConfiguration: false,
+        configureModule: false,
+        peerAccess: "",
+      },
       error: {
         getConfiguration: "",
         configureModule: "",
+        peerAccess: "",
         cluster_store: "",
         cluster_join: "",
         cluster_valkey: "",
@@ -358,7 +403,11 @@ export default {
   computed: {
     ...mapState(["instanceName", "core", "appName"]),
     busy() {
-      return this.loading.getConfiguration || this.loading.configureModule;
+      return (
+        this.loading.getConfiguration ||
+        this.loading.configureModule ||
+        !!this.loading.peerAccess
+      );
     },
     valkeyOptions() {
       return this.valkeyInstances.map((v) => ({
@@ -427,6 +476,21 @@ export default {
       return `${name} (${peer.module_id}, ${this.$t("cluster.node")} ${
         peer.node
       }${host})`;
+    },
+    async setPeerAccess(peer) {
+      this.error.peerAccess = "";
+      this.loading.peerAccess = peer.module_id;
+      try {
+        const result = await this.runModuleTask("set-peer-access", {
+          peer: peer.module_id,
+          allowed: !peer.secret_access,
+        });
+        this.$set(peer, "secret_access", result.allowed);
+      } catch (failure) {
+        this.error.peerAccess = this.taskErrorMessage(failure);
+      } finally {
+        this.loading.peerAccess = "";
+      }
     },
     async getConfiguration() {
       this.loading.getConfiguration = true;
@@ -553,6 +617,14 @@ export default {
   padding-left: $spacing-06;
 }
 .peers li {
+  margin-bottom: $spacing-03;
+}
+.access-list li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: $spacing-03 $spacing-05;
   margin-bottom: $spacing-03;
 }
 </style>

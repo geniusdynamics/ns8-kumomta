@@ -518,7 +518,10 @@ def generate_dkim_key():
 
 def public_from_private(pem):
     from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
     key = serialization.load_pem_private_key(pem.encode(), password=None)
+    if not isinstance(key, rsa.RSAPrivateKey):
+        raise ValueError("DKIM signing requires an RSA private key")
     der = key.public_key().public_bytes(serialization.Encoding.DER,
                                         serialization.PublicFormat.SubjectPublicKeyInfo)
     return base64.b64encode(der).decode()
@@ -560,7 +563,13 @@ def dkim_vault_path(settings, domain, selector):
     return openbao_secret_path(settings, "dkim", domain, selector)
 
 
-def openbao_write(settings, path, value, env=None):
+class OpenBaoHTTPError(RuntimeError):
+    def __init__(self, status, path):
+        super().__init__(f"OpenBao answered {status} for {path}")
+        self.status = status
+
+
+def openbao_write(settings, path, value, env=None, *, create_only=False):
     """Write a KV v2 secret: {field: value}. Raises RuntimeError"""
     env = env if env is not None else read_openbao_env()
     address = env.get("VAULT_ADDR", "").rstrip("/")
@@ -569,14 +578,17 @@ def openbao_write(settings, path, value, env=None):
         raise RuntimeError("OpenBao address or token not set")
     field = settings["vault_key"] or "key"
     url = f"{address}/v1/{settings['vault_mount'].strip('/')}/data/{path}"
-    body = json.dumps({"data": {field: value}}).encode()
+    payload = {"data": {field: value}}
+    if create_only:
+        payload["options"] = {"cas": 0}
+    body = json.dumps(payload).encode()
     req = urllib.request.Request(url, data=body, method="POST", headers={
         "X-Vault-Token": token, "Content-Type": "application/json"})
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
             resp.read()
     except urllib.error.HTTPError as ex:
-        raise RuntimeError(f"OpenBao answered {ex.code} for {path}") from None
+        raise OpenBaoHTTPError(ex.code, path) from None
     except (urllib.error.URLError, OSError, ValueError) as ex:
         raise RuntimeError(f"cannot reach OpenBao: {ex}") from None
 
@@ -595,7 +607,7 @@ def openbao_read(settings, path, env=None):
         with urllib.request.urlopen(req, timeout=10) as resp:
             payload = json.loads(resp.read() or b"{}")
     except urllib.error.HTTPError as ex:
-        raise RuntimeError(f"OpenBao answered {ex.code} for {path}") from None
+        raise OpenBaoHTTPError(ex.code, path) from None
     except (urllib.error.URLError, OSError, ValueError) as ex:
         raise RuntimeError(f"cannot reach OpenBao: {ex}") from None
     value = ((payload.get("data") or {}).get("data") or {}).get(field)
@@ -676,46 +688,100 @@ def read_shared_dkim_key(settings, domain, selector):
     is none. Raises RuntimeError when OpenBao cannot answer."""
     try:
         return openbao_read(settings, dkim_vault_path(settings, domain, selector))
-    except RuntimeError as ex:
-        if "answered 404" in str(ex) or "no '" in str(ex):
+    except OpenBaoHTTPError as ex:
+        if ex.status == 404:
             return None
         raise
 
 
-def install_dkim_key(settings, domain, selector, pem=None):
-    """Store a DKIM private key (new one unless pem is given) in OpenBao
-    or a local 0600 file, and its public key. Return the key location.
-    Clustered with OpenBao, the path is shared by the peers: an existing key
-    there is used, never replaced (DomainError shared_key_exists when another
-    key is given). Raises RuntimeError (OpenBao) or DomainError (invalid pem)"""
-    if clustered(settings) and settings["vault_enabled"]:
-        shared = read_shared_dkim_key(settings, domain, selector)
-        if shared is not None:
-            if pem is not None and public_from_private(pem) != public_from_private(shared):
+def _dkim_file(path):
+    try:
+        with open(path) as fp:
+            return fp.read()
+    except FileNotFoundError:
+        return None
+
+
+def _dkim_public(pem):
+    try:
+        return public_from_private(pem)
+    except Exception:
+        raise DomainError("invalid_private_key") from None
+
+
+def _create_shared_dkim_key(settings, domain, selector, pem):
+    """Return the key committed at this selector, including on a concurrent create."""
+    try:
+        openbao_write(settings, dkim_vault_path(settings, domain, selector), pem, create_only=True)
+    except OpenBaoHTTPError as ex:
+        if ex.status == 400:  # KV v2 reports a CAS mismatch as HTTP 400
+            winner = read_shared_dkim_key(settings, domain, selector)
+            if winner is not None:
+                return winner
+        raise
+    return pem
+
+
+def install_dkim_key(settings, domain, selector, pem=None, *, source="domain", rotate=False):
+    """Install a domain's key under the caller's settings lock. In a cluster a
+    selector's fingerprint is immutable. Only explicit generation or shared
+    OpenBao provisioning may create a missing key without an import."""
+    cluster = clustered(settings)
+    if cluster and rotate:
+        raise DomainError("cluster_rotation_refused", domain)
+    vault = settings["vault_enabled"]
+    keyfile, pubfile = dkim_paths(domain, selector)
+    local = _dkim_file(keyfile)
+    published = _dkim_file(pubfile) if cluster else None
+    supplied_public = _dkim_public(pem) if pem is not None else None
+    local_public = _dkim_public(local) if cluster and local is not None else None
+
+    def check_fingerprint(key):
+        public = _dkim_public(key)
+        if cluster:
+            if (published is not None and published.strip() != public) or (local_public and local_public != public):
+                raise DomainError("local_key_conflict", domain)
+            if supplied_public and supplied_public != public:
                 raise DomainError("shared_key_exists", domain)
-            keyfile, _ = dkim_paths(domain, selector)
-            if os.path.exists(keyfile):
-                os.unlink(keyfile)
-            store_dkim_public(domain, selector, public_from_private(shared))
-            return "openbao"
-    if pem is None:
-        pem, public = generate_dkim_key()
-    else:
+        return public
+
+    shared = None
+    if vault and (cluster or source != "domain"):
         try:
-            public = public_from_private(pem)
-        except Exception:
-            raise DomainError("invalid_private_key") from None
-    keyfile, _ = dkim_paths(domain, selector)
-    if settings["vault_enabled"]:
-        openbao_write(settings, dkim_vault_path(settings, domain, selector), pem)
-        if os.path.exists(keyfile):
-            os.unlink(keyfile)
-        location = "openbao"
+            shared = read_shared_dkim_key(settings, domain, selector)
+        except RuntimeError as ex:
+            log(agent.SD_ERR + str(ex))
+            raise DomainError("openbao_read_failed", domain) from None
+    if source == "shared" and shared is None:
+        raise DomainError("shared_key_missing", domain)
+    if source == "shared" or (cluster and shared is not None):
+        candidate = shared
+    elif source == "generate" and rotate:
+        candidate, _ = generate_dkim_key()
+    elif pem is not None:
+        candidate = pem
+    elif local is not None:
+        candidate = local
+    elif shared is not None:
+        candidate = shared
     else:
-        store_dkim_private(domain, selector, pem)
-        location = "local"
+        if cluster and (published is not None or (not vault and source != "generate")):
+            raise DomainError("cluster_key_required", domain)
+        candidate, _ = generate_dkim_key()
+
+    public = check_fingerprint(candidate)
+    if vault:
+        if cluster and shared is None:
+            committed = _create_shared_dkim_key(settings, domain, selector, candidate)
+            public = check_fingerprint(committed)
+        elif not cluster and (shared is None or _dkim_public(shared) != public):
+            openbao_write(settings, dkim_vault_path(settings, domain, selector), candidate)
+    else:
+        store_dkim_private(domain, selector, candidate)
     store_dkim_public(domain, selector, public)
-    return location
+    if vault and local is not None:
+        os.unlink(keyfile)  # Only discard the local copy after both stores succeeded.
+    return "openbao" if vault else "local"
 
 
 def remove_dkim_files(domain, selector):

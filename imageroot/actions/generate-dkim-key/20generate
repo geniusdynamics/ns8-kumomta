@@ -30,10 +30,8 @@ import agent
 import kumomta_ns8 as kumo
 
 request = json.load(sys.stdin)
-settings = kumo.load_settings()
-domain = request["domain"].lower()
+domain = request["domain"].lower().rstrip(".")
 source = request.get("source") or "generate"
-clustered = kumo.clustered(settings)
 
 
 def failed(field, value, code):
@@ -42,75 +40,50 @@ def failed(field, value, code):
     sys.exit(3)
 
 
-entry = next((d for d in settings["domains"] if d["domain"] == domain), None)
-if entry is None:
-    failed('domain', domain, 'domain_not_found')
-selector = entry["selector"]
-keyfile, pubfile = kumo.dkim_paths(domain, selector)
+def selector_for(settings):
+    entry = kumo.find_domain(settings, domain)
+    if entry is None:
+        failed('domain', domain, 'domain_not_found')
+    return entry["selector"]
 
-shared = None
-if settings["vault_enabled"]:
-    try:
-        shared = kumo.read_shared_dkim_key(settings, domain, selector)
-    except RuntimeError as ex:
-        print(agent.SD_ERR + str(ex), file=sys.stderr)
-        failed('domain', domain, 'openbao_read_failed')
 
-if source == "generate":
-    if clustered and request.get("rotate"):
-        failed('rotate', domain, 'cluster_rotation_refused')
-    if clustered and shared is not None:
-        failed('source', domain, 'shared_key_exists')
-    if os.path.exists(keyfile) and not request.get("rotate"):
-        with open(keyfile) as fp:
-            pem = fp.read()
-    else:
-        pem, _ = kumo.generate_dkim_key()
-elif source == "shared":
-    if shared is None:
-        failed('source', domain, 'shared_key_missing')
-    pem = shared
-elif source == "import":
-    pem = request.get("private_key") or ""
-elif source == "peer":
+pem = (request.get("private_key") or "") if source == "import" else None
+if source == "peer":
+    # Do not wait for another module's task while holding our settings lock.
+    settings = kumo.load_settings()
+    requested_selector = selector_for(settings)
+    identity = kumo.store_identity(settings)
     peer = request.get("peer") or ""
-    if not clustered or peer == os.environ.get("MODULE_ID") or peer not in kumo.kumomta_modules():
+    if not kumo.clustered(settings) or peer == os.environ.get("MODULE_ID") or peer not in kumo.kumomta_modules():
         failed('peer', peer, 'not_a_kumomta_instance')
     import agent.tasks
     ret = agent.tasks.run(agent_id=f"module/{peer}", action="reveal-dkim-key",
-                          data={"domain": domain, "selector": selector},
+                          data={"domain": domain, "selector": requested_selector},
                           extra={"isNotificationHidden": True})
     if ret.get("exit_code") != 0:
         print(agent.SD_ERR + f"reveal-dkim-key of {peer} failed (exit code {ret.get('exit_code')})", file=sys.stderr)
         failed('peer', peer, 'peer_key_unavailable')
     pem = (ret.get("output") or {}).get("private_key") or ""
 
-try:
-    public = kumo.public_from_private(pem)
-except Exception:
-    failed('private_key', '', 'invalid_private_key')
-
-if settings["vault_enabled"]:
-    if shared is not None and kumo.public_from_private(shared) != public:
-        if clustered:
-            failed('source', domain, 'shared_key_exists')
-    if shared is None or kumo.public_from_private(shared) != public:
-        try:
-            kumo.openbao_write(settings, kumo.dkim_vault_path(settings, domain, selector), pem)
-        except RuntimeError as ex:
-            print(agent.SD_ERR + str(ex), file=sys.stderr)
-            failed('domain', domain, 'openbao_write_failed')
-    if os.path.exists(keyfile):
-        os.unlink(keyfile)
-    location = "openbao"
-else:
-    kumo.store_dkim_private(domain, selector, pem)
-    location = "local"
-kumo.store_dkim_public(domain, selector, public)
+with kumo.settings_lock():
+    settings = kumo.load_settings()
+    selector = selector_for(settings)
+    if source == "peer" and (selector != requested_selector or kumo.store_identity(settings) != identity
+                             or not kumo.clustered(settings)):
+        failed('peer', peer, 'peer_key_unavailable')
+    try:
+        location = kumo.install_dkim_key(settings, domain, selector, pem, source=source, rotate=request.get("rotate"))
+    except kumo.DomainError as ex:
+        field = {"cluster_rotation_refused": "rotate", "invalid_private_key": "private_key",
+                 "openbao_read_failed": "domain"}.get(ex.code, "source")
+        failed(field, ex.value, ex.code)
+    except RuntimeError as ex:
+        print(agent.SD_ERR + str(ex), file=sys.stderr)
+        failed('domain', domain, 'openbao_write_failed')
+    record = kumo.dkim_record(domain, selector)
 
 # kumod caches the signers: a configuration epoch bump drops them
 if agent.run_helper("systemctl", "--user", "-q", "is-active", "kumomta.service").returncode == 0:
     agent.run_helper("runagent", "kumomta-reload")
 
-json.dump({"domain": domain, "selector": selector, "key_location": location,
-           "dkim_record": kumo.dkim_record(domain, selector)}, fp=sys.stdout)
+json.dump({"domain": domain, "selector": selector, "key_location": location, "dkim_record": record}, fp=sys.stdout)

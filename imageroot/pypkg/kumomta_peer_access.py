@@ -39,7 +39,9 @@ def registered_uuid(peer):
     if peer == os.environ["MODULE_ID"] or not kumo.MODULE_ID_RE.fullmatch(peer):
         return None
     with agent.redis_connect(socket_timeout=5, socket_connect_timeout=5) as rdb:
-        with rdb.pipeline() as pipe:
+        # The read-only NS8 Redis user permits HGET, while MULTI/EXEC is
+        # reserved for privileged clients.
+        with rdb.pipeline(transaction=False) as pipe:
             module_uuid, image_url = (
                 pipe.hget("cluster/module_uuid", peer)
                 .hget(f"module/{peer}/environment", "IMAGE_URL")

@@ -48,7 +48,7 @@ Action fails with
 Public DKIM record
     [Arguments]    ${module}    ${domain}
     ${result} =    Run on    ${module}    list-domains
-    ${records} =    Evaluate    [d['dkim_record'] for d in $result['domains'] if d['domain'] == $domain]
+    ${records} =    Evaluate    [d['dkim_record'] for d in $result['domains'] if d['domain'] == '${domain}']
     Length Should Be    ${records}    1
     RETURN    ${records}[0]
 

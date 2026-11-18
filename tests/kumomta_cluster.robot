@@ -36,6 +36,22 @@ Run on
     ${result} =    Evaluate    json.loads('''${output}''')    modules=json
     RETURN    ${result}
 
+Action fails with
+    [Arguments]    ${module}    ${action}    ${data}    ${error}
+    ${output}  ${rc} =    Execute Command    api-cli run module/${module}/${action} --data '${data}'
+    ...    return_rc=True
+    Should Not Be Equal As Integers    ${rc}    0
+    Should Contain    ${output}    ${error}
+    Should Not Contain    ${output}    PRIVATE KEY
+    Should Not Contain    ${output}    ${ACL_PASS}
+
+Public DKIM record
+    [Arguments]    ${module}    ${domain}
+    ${result} =    Run on    ${module}    list-domains
+    ${records} =    Evaluate    [d['dkim_record'] for d in $result['domains'] if d['domain'] == '${domain}']
+    Length Should Be    ${records}    1
+    RETURN    ${records}[0]
+
 Configuration of
     [Arguments]    ${module}
     ${config} =    Run on    ${module}    get-configuration
@@ -165,6 +181,12 @@ Check if an instance uses a manual store with tsa-daemon
 Check if a second instance joins with cluster_join without restarting the first
     Skip If    '${VPN_ADDR}' == ''    no cluster VPN address on this node
     ${pid_before} =    Main PID of    ${A}
+    Action fails with    ${B}    configure-module    {"cluster_join":"${A}"}    cluster_join_failed
+    ${config} =    Mode is    ${B}    standalone
+    Should Not Be True    ${config}[cluster_redis_password_set]
+    ${grant} =    Run on    ${A}    set-peer-access    {"peer":"${B}","allowed":true}
+    Should Be Equal    ${grant}[peer]    ${B}
+    Should Be True    ${grant}[allowed]
     ${result} =    Run on    ${B}    configure-module    {"cluster_join":"${A}"}
     ${config} =    Mode is    ${B}    shared
     Should Be Equal    ${config}[cluster_store]    manual
@@ -188,6 +210,22 @@ Check if a second instance joins with cluster_join without restarting the first
     ${pid_after} =    Main PID of    ${A}
     Should Be Equal    ${pid_before}    ${pid_after}
     Peer daemon is listed    ${A}    0
+
+Check that the grant to the second instance excludes another installed peer
+    Skip If    '${VPN_ADDR}' == ''    no cluster VPN address on this node
+    ${output}  ${rc} =    Execute Command    add-module ${IMAGE_URL} 1    return_rc=True
+    Should Be Equal As Integers    ${rc}    0    ${output}
+    ${peer} =    Evaluate    ast.literal_eval($output)['module_id']    modules=ast
+    TRY
+        Action fails with    ${peer}    configure-module
+        ...    {"hostname":"mx-other.ns8-ci.test","inbound_enabled":false,"submission_enabled":true,"submission_port":3587,"cluster_join":"${A}"}
+        ...    cluster_join_failed
+        ${config} =    Mode is    ${peer}    standalone
+        Should Not Be True    ${config}[cluster_redis_password_set]
+    FINALLY
+        ${output}  ${rc} =    Execute Command    remove-module --no-preserve ${peer}    return_rc=True
+        Should Be Equal As Integers    ${rc}    0    ${output}
+    END
 
 Check if designating a second TSA host restarts the peers once
     Skip If    '${VPN_ADDR}' == ''    no cluster VPN address on this node
@@ -239,24 +277,49 @@ Check if each sending IP gets its own limits in the shared store
 
 Check if a DKIM key is imported from a peer, never regenerated
     Skip If    '${VPN_ADDR}' == ''    no cluster VPN address on this node
-    ${result} =    Run on    ${A}    configure-module    {"domains":[{"domain":"cluster.${CI_DOMAIN}","selector":"c1"}]}
-    ${result} =    Run on    ${B}    configure-module    {"domains":[{"domain":"cluster.${CI_DOMAIN}","selector":"c1"}]}
+    ${domains} =    Set Variable    {"domains":[{"domain":"cluster.${CI_DOMAIN}","selector":"c1"},{"domain":"conflict.${CI_DOMAIN}","selector":"c1"}]}
+    Run on    ${A}    configure-module    ${domains}
+    Run on    ${B}    configure-module    ${domains}
     # In a cluster no key is made up by configure-module
     ${config} =    Configuration of    ${B}
     Should Be Equal    ${config}[domains][0][key_location]    missing
     ${keyA} =    Run on    ${A}    generate-dkim-key    {"domain":"cluster.${CI_DOMAIN}"}
     Should Be Equal    ${keyA}[key_location]    local
-    ${output}  ${rc} =    Execute Command    api-cli run module/${A}/generate-dkim-key --data '{"domain":"cluster.${CI_DOMAIN}","rotate":true}'
-    ...    return_rc=True
-    Should Not Be Equal As Integers    ${rc}  0
-    Should Contain    ${output}    cluster_rotation_refused
-    ${keyB} =    Run on    ${B}    generate-dkim-key    {"domain":"cluster.${CI_DOMAIN}","source":"peer","peer":"${A}"}
+    Action fails with    ${A}    generate-dkim-key    {"domain":"cluster.${CI_DOMAIN}","rotate":true}    cluster_rotation_refused
+    ${import} =    Set Variable    {"domain":"cluster.${CI_DOMAIN}","source":"peer","peer":"${A}"}
+    ${keyB} =    Run on    ${B}    generate-dkim-key    ${import}
     ${text} =    Evaluate    json.dumps($keyB)    modules=json
     Should Not Contain    ${text}    PRIVATE KEY
     Should Be Equal    ${keyB}[key_location]    local
     Should Be Equal    ${keyB}[dkim_record][value]    ${keyA}[dkim_record][value]
+    ${repeated} =    Run on    ${B}    generate-dkim-key    ${import}
+    Should Be Equal    ${repeated}[dkim_record]    ${keyA}[dkim_record]
     ${output}  ${rc} =    In module    ${B}    stat -c %a dkim/cluster.${CI_DOMAIN}/c1.key
     Should Be Equal    ${output}    600
+
+Check that importing a different key preserves the existing selector on each peer
+    Skip If    '${VPN_ADDR}' == ''    no cluster VPN address on this node
+    ${domain} =    Set Variable    conflict.${CI_DOMAIN}
+    ${keyA} =    Run on    ${A}    generate-dkim-key    {"domain":"${domain}"}
+    ${keyB} =    Run on    ${B}    generate-dkim-key    {"domain":"${domain}"}
+    Should Not Be Equal    ${keyB}[dkim_record][value]    ${keyA}[dkim_record][value]
+    Action fails with    ${B}    generate-dkim-key    {"domain":"${domain}","source":"peer","peer":"${A}"}    local_key_conflict
+    ${recordA} =    Public DKIM record    ${A}    ${domain}
+    ${recordB} =    Public DKIM record    ${B}    ${domain}
+    Should Be Equal    ${recordA}    ${keyA}[dkim_record]
+    Should Be Equal    ${recordB}    ${keyB}[dkim_record]
+
+Check that revocation blocks further imports and joins from the same instance
+    Skip If    '${VPN_ADDR}' == ''    no cluster VPN address on this node
+    ${domain} =    Set Variable    cluster.${CI_DOMAIN}
+    ${before} =    Public DKIM record    ${B}    ${domain}
+    ${grant} =    Run on    ${A}    set-peer-access    {"peer":"${B}","allowed":false}
+    Should Not Be True    ${grant}[allowed]
+    Action fails with    ${B}    generate-dkim-key    {"domain":"${domain}","source":"peer","peer":"${A}"}    peer_key_unavailable
+    Action fails with    ${B}    configure-module    {"cluster_join":"${A}"}    cluster_join_failed
+    ${after} =    Public DKIM record    ${B}    ${domain}
+    Should Be Equal    ${after}    ${before}
+    Mode is    ${B}    shared
 
 Check if a store outage falls back to local throttles and keeps sending
     Skip If    '${VPN_ADDR}' == ''    no cluster VPN address on this node

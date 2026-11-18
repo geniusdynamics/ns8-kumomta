@@ -14,29 +14,31 @@
 # gets its own credentials from ns8-valkey.
 
 import json
-import os
 import sys
 import agent
 import kumomta_ns8 as kumo
+from kumomta_peer_access import authorized_peer
 
-settings = kumo.load_settings()
-if not kumo.clustered(settings):
-    agent.set_status('validation-failed')
-    json.dump([{'field': 'cluster_store', 'parameter': 'cluster_store', 'value': 'none',
-                'error': 'not_clustered'}], fp=sys.stdout)
-    sys.exit(3)
+with authorized_peer() as peer:
+    settings = kumo.load_settings()
+    if not kumo.clustered(settings):
+        agent.set_status('validation-failed')
+        json.dump([{'field': 'cluster_store', 'parameter': 'cluster_store', 'value': 'none',
+                    'error': 'not_clustered'}], fp=sys.stdout)
+        sys.exit(3)
 
-output = {
-    "cluster_store": settings["cluster_store"],
-    "cluster_valkey": settings["cluster_valkey"],
-    "cluster_redis_nodes": settings["cluster_redis_nodes"],
-    "cluster_redis_username": settings["cluster_redis_username"],
-    "cluster_redis_cluster": settings["cluster_redis_cluster"],
-    "tsa_enabled": settings["tsa_enabled"],
-    "cluster_redis_password": "",
-}
-if settings["cluster_store"] == "manual":
-    output["cluster_redis_password"] = kumo.store_password(settings)
+    output = {
+        "cluster_store": settings["cluster_store"],
+        "cluster_valkey": settings["cluster_valkey"],
+        "cluster_redis_nodes": settings["cluster_redis_nodes"],
+        "cluster_redis_username": settings["cluster_redis_username"],
+        "cluster_redis_cluster": settings["cluster_redis_cluster"],
+        "tsa_enabled": settings["tsa_enabled"],
+        "cluster_redis_password": "",
+    }
+    if settings["cluster_store"] == "manual":
+        output["cluster_redis_password"] = kumo.store_password(settings)
 
-print(f"Cluster settings handed to {os.environ.get('AGENT_TASK_USER', 'unknown')}", file=sys.stderr)
-json.dump(output, fp=sys.stdout)
+    print(f"Cluster settings handed to module/{peer}", file=sys.stderr)
+    json.dump(output, fp=sys.stdout)
+    sys.stdout.flush()

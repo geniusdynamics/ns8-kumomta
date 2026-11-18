@@ -1,0 +1,12 @@
+{
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "$id": "http://nethserver.org/json-schema/task/output/kumomta/set-peer-access",
+    "title": "Effective peer access",
+    "type": "object",
+    "required": ["peer", "allowed"],
+    "additionalProperties": false,
+    "properties": {
+        "peer": {"type": "string"},
+        "allowed": {"type": "boolean"}
+    }
+}

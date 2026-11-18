@@ -1,0 +1,13 @@
+{
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "$id": "http://nethserver.org/json-schema/task/input/kumomta/set-peer-access",
+    "title": "Change a peer's access to cluster secrets",
+    "description": "Approve or revoke access by this KumoMTA peer to the manual store password and domain signing keys of this instance.",
+    "type": "object",
+    "required": ["peer", "allowed"],
+    "additionalProperties": false,
+    "properties": {
+        "peer": {"type": "string", "maxLength": 64, "pattern": "^[a-z][a-z0-9-]*[0-9]+$"},
+        "allowed": {"type": "boolean"}
+    }
+}

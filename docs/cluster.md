@@ -66,9 +66,12 @@ connection leases only; it never holds messages.
    - turn on **Run the automation daemon** if you want traffic shaping
      automation (recommended on at least one instance; on every instance it
      survives the loss of any node).
-3. On each other instance: **Join another KumoMTA instance** and choose the
-   first one. This copies its store settings and, for a manual store, its
-   password (action `reveal-cluster-settings`, see Security).
+3. On the first instance's **Cluster** page, grant the joining instance
+   access to its secrets. On the joining instance, use **Join another
+   KumoMTA instance** and select the first one. The grant authorizes copying
+   its store settings, including a manual store password, and importing
+   its DKIM keys. Grant access only to an instance serving the same mail
+   organization.
 4. Spread the inbound mail: several MX records with the same preference,
    or a load balancer in front of the inbound and submission ports.
    Outbound limits are global because every instance uses the same store.
@@ -82,6 +85,7 @@ api-cli run module/kumomta1/configure-module --data '{
   "cluster_redis_password": "...",
   "tsa_enabled": true
 }'
+api-cli run module/kumomta1/set-peer-access --data '{"peer":"kumomta2","allowed":true}'
 api-cli run module/kumomta2/configure-module --data '{"cluster_join": "kumomta1"}'
 api-cli run module/kumomta3/configure-module --data '{"cluster_store": "valkey", "cluster_valkey": "valkey1"}'
 ```
@@ -217,28 +221,26 @@ the daemon of a peer that left are discarded instead of being delivered.
 
 ## DKIM keys in a cluster
 
-Every instance must sign with the same key, so in a cluster a key is
-generated once and imported everywhere else, never overwritten:
+Peers serving the same domain and selector must sign with the same key.
+The **Domains** page shows the public DNS record for comparison.
 
-- `configure-module` does not generate missing keys (a standalone instance
-  still does).
-- `generate-dkim-key` takes `source`: `generate` (default), `shared` (the key
-  at the OpenBao path), `import` (`private_key`, PEM) or `peer` (`peer`: the
-  kumomta instance to copy it from).
-- With OpenBao on and the same path on every instance, the path is shared:
-  a key that exists there is never replaced (`shared_key_exists`); use
-  `shared`. `add-domain` and the domain API use the shared key when one
-  exists.
-- Without OpenBao, `peer` copies the key through the guarded action
-  `reveal-dkim-key` of the peer (role `clusterpeer`, `kumomta@any:clusterpeer`;
-  readers cannot run it, the key is never logged, and NS8 keeps the task
-  output where other modules cannot read it).
-- Rotation in place is refused (`cluster_rotation_refused`): add the domain
-  with a new selector on every instance, publish the new record, then
-  remove the old selector.
-
-The *Domains* page shows *Use the shared key* and *Import key* (from another
-instance, or a PEM key) for a domain without key in a cluster.
+- **With OpenBao**, point the peers at the same KV v2 path. The first
+  successful create establishes the key. Concurrent creates use a
+  create-only write and subsequent requests reuse the stored key.
+  An existing local key can seed an empty path. An import that conflicts
+  with an established key fails and the operator can compare fingerprints.
+- **With local keys**, configure the domain and selector on each peer.
+  On the source, use its existing key or run `generate-dkim-key` once.
+  Grant the receiving instance access on the source, then use **Import key**
+  on the receiver with the source instance selected. Repeating the import
+  with the same key is safe. For a domain created through `add-domain`
+  or the HTTPS API, supply the common PEM or provision the matching key
+  before creating the domain.
+- A clustered instance refuses in-place rotation. Each domain has one
+  active selector. To roll over, prepare the new key separately, publish
+  its DNS record, allow time for DNS propagation, and coordinate activation
+  of the prepared selector and key on the peers. Keep the old DNS record
+  available while messages signed with the old selector are in flight.
 
 ## Failure modes
 
@@ -278,13 +280,19 @@ is not offered yet.
 - The store password is a 0600 file (`state/secrets`, in the backup), or
   an OpenBao secret, and it is passed to kumod through a KeySource, never in
   the policy, argv or environment. Store URLs with credentials are refused.
-- `reveal-cluster-settings` hands the settings and the manual store
-  password to another kumomta instance. Its role `clusterpeer` is granted
-  only to kumomta instances (`kumomta@any:clusterpeer`); its name does not
-  start with `get-`, `list-`, `show-` or `read-`, so readers cannot run it.
-  NS8 keeps its output in `task/module/<id>/...` for 8 hours, which other
-  modules cannot read (cluster administrators can). It never logs the
-  value.
+- The source administrator grants access per peer. Both
+  `reveal-cluster-settings` and `reveal-dkim-key` check the authenticated
+  calling module against these grants in addition to the NS8 `clusterpeer`
+  role. Grants are directional and tied to the installed module's UUID.
+  A new installation starts with an empty grant list. Inspect each peer's
+  `secret_access` in `get-configuration` on the source. After cloning or
+  restoring a source instance, review the peers and grant access again.
+- Revoke future reads on the source with
+  `api-cli run module/kumomta1/set-peer-access --data '{"peer":"kumomta2","allowed":false}'`.
+  A peer can retain keys and store credentials it already received.
+  Rotate those credentials when retiring a peer that should lose their use.
+  NS8 stores reveal task results under the source module for eight hours,
+  accessible to cluster administrators.
 - tsa-daemon has no authentication: kumod's TSA client sends no
   credentials, so the access is by source address (the cluster network).
   The port listens on the VPN address only and NS8 accepts the cluster

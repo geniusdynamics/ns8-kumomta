@@ -20,7 +20,7 @@ credential. Plain HTTP redirects to HTTPS.
 | 401 | missing or wrong credential |
 | 403 | the credential lacks the scope of the endpoint |
 | 404 | unknown path, or a domain that does not exist or belongs to someone else |
-| 409 | the domain already exists |
+| 409 | the domain already exists or its selector has a conflicting key |
 | 422 | invalid input (`error` says which) |
 | 429 | over 120 requests per minute, or too many failed authentications |
 
@@ -107,6 +107,10 @@ curl -u platform1:$SECRET -H 'Content-Type: application/json' \
 | `tenant` | no | must equal the credential's tenant when it has one |
 | `dkim_private_key` | no | PEM key to import instead of generating one |
 
+In a cluster using local DKIM storage, supply the common key or provision
+it first. With a shared OpenBao path, concurrent requests adopt the same
+stored key. [Cluster DKIM setup](cluster.md#dkim-keys-in-a-cluster)
+
 ### Get a domain
 
 `GET /api/v1/domains/<domain>` → the domain object.
@@ -169,8 +173,9 @@ secrets.
 | `generate-dkim-key` | admin | `{"domain", "rotate", "source", "private_key", "peer"}` | `{"domain", "selector", "key_location", "dkim_record"}` |
 | `list-openbao-only-secrets` | reader | | see [openbao.md](openbao.md) |
 | `copy-openbao-to-local` | admin | | `{"copied": [...], "failed": [...]}` |
-| `reveal-dkim-key` | clusterpeer (other kumomta instances) | `{"domain", "selector"}` | the DKIM private key, for `generate-dkim-key` with `source: peer` |
-| `reveal-cluster-settings` | clusterpeer (other kumomta instances) | | cluster store settings and the manual store password, see [cluster.md](cluster.md) |
+| `set-peer-access` | admin on the source | `{"peer":"kumomta2","allowed":true}` | selected peer and effective approval |
+| `reveal-dkim-key` | approved clusterpeer | `{"domain", "selector"}` | DKIM private key for the receiving instance |
+| `reveal-cluster-settings` | approved clusterpeer | | cluster store settings and the manual store password, see [cluster.md](cluster.md) |
 | `get-queue-status` | reader | | queue and delivery counters |
 | `list-recent-events` | reader | `{"types", "limit", "segments"}` | recent log records |
 

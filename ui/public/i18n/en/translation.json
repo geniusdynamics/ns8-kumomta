@@ -107,7 +107,8 @@
     "validate-domain": "Check DNS of sending domain",
     "list-domains": "List sending domains",
     "reveal-cluster-settings": "Copy the cluster settings",
-    "reveal-dkim-key": "Copy a DKIM key"
+    "reveal-dkim-key": "Copy a DKIM key",
+    "set-peer-access": "Change peer access"
   },
   "error": {
     "error": "Error",
@@ -185,8 +186,8 @@
     "import_pem_label": "Private key (PEM)",
     "import_pem_helper": "Never shown again, stored in a file readable only by the module, or in OpenBao",
     "cluster_keys_title": "Cluster: one key per domain for every instance",
-    "cluster_keys_openbao": "The instances read the DKIM keys from the same OpenBao path. Generate the key of a new domain once; on the other instances use the shared key. A key that exists at the shared path is never replaced, and keys are not rotated in place: add the domain with a new selector to rotate.",
-    "cluster_keys_local": "Every instance must sign with the same key. Generate the key of a new domain on one instance, then on the others import it: copy it from that instance (only KumoMTA instances can ask for it) or paste the PEM key. Keys are not generated automatically in a cluster, and not rotated in place: add the domain with a new selector to rotate."
+    "cluster_keys_openbao": "For each domain and selector, use the same OpenBao path on every instance. Generate the key once, then use the shared key on each peer.",
+    "cluster_keys_local": "Generate the signing key on one instance. On its Cluster page, allow the receiving instance under Peer access, then import the key here. You can also import the same PEM key directly."
   },
   "delivery": {
     "title": "Delivery",
@@ -328,7 +329,7 @@
     "valkey_not_found": "No Valkey instance with this name publishes an endpoint",
     "invalid_redis_url": "Use redis://host:port or rediss://host:port, without user name or password",
     "no_cluster_address": "This node has no cluster VPN address",
-    "cluster_join_failed": "The other instance did not hand over its cluster settings: is it clustered, and is this instance authorized?",
+    "cluster_join_failed": "Check that the source instance uses a shared store and allows this instance under Peer access on its Cluster page.",
     "tsa_port_unavailable": "Cannot allocate a TCP port for the automation daemon",
     "not_clustered": "That instance is not clustered",
     "duplicate_address": "This sending IP is listed twice",
@@ -337,9 +338,12 @@
     "duplicate_provider": "This destination is listed twice for the same IP",
     "shared_key_exists": "A key already exists at the shared OpenBao path: use the shared key, or import that same key",
     "shared_key_missing": "There is no key at the shared OpenBao path",
-    "cluster_rotation_refused": "In a cluster, keys are not rotated in place: add the domain with a new selector on every instance",
+    "cluster_key_required": "Import the existing key for this domain and selector, or generate the first key on the instance that will share it.",
+    "local_key_conflict": "This instance already has a different key for this domain and selector. Check the source key before importing.",
+    "peer_not_authorized": "Allow the requesting instance under Peer access on the source instance’s Cluster page.",
+    "cluster_rotation_refused": "Use a new selector to rotate the signing key across cluster members.",
     "openbao_read_failed": "Cannot read OpenBao",
-    "peer_key_unavailable": "That instance has no key for this domain and selector, or did not hand it over",
+    "peer_key_unavailable": "Check that the source instance has this domain and selector and allows this instance under Peer access on its Cluster page.",
     "key_missing": "No key for this domain"
   },
   "warnings": {
@@ -390,7 +394,11 @@
     "choice_none": "None (standalone)",
     "choice_none_description": "Throttles and connection limits are local to this instance. The default.",
     "choice_join": "Join another KumoMTA instance",
-    "choice_join_description": "Copy the store settings of a clustered instance (and its store password, if any). The simplest way to add a node.",
+    "choice_join_description": "Copy the store settings from another instance. First allow this instance under Peer access on the source instance’s Cluster page.",
+    "peer_access": "Peer access",
+    "peer_access_description": "Allow an instance to request this instance’s DKIM private keys and shared store settings, including a manual store password. Revoking access stops future requests. Rotate any copied secrets you need to invalidate.",
+    "allow_access": "Allow access",
+    "revoke_access": "Revoke access",
     "choice_valkey": "Valkey instance of this cluster",
     "choice_valkey_description": "An ns8-valkey application. This instance gets its own credentials from it.",
     "choice_manual": "Other Redis or Valkey",

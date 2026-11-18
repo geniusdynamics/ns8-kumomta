@@ -556,6 +556,9 @@
             "type": "array",
             "items": {
                 "type": "object",
+                "properties": {
+                    "secret_access": {"type": "boolean", "description": "This instance has approved the peer to read its cluster secrets"}
+                },
                 "required": [
                     "module_id"
                 ]

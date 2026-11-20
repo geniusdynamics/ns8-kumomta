@@ -42,7 +42,6 @@ curl -u platform1:$SECRET -H 'Content-Type: application/json' -d '{
     "text_body": "Hi {{ name }}, ...",
     "html_body": "<p>Hi {{ name }}, ...</p>",
     "headers": {
-      "X-Tenant": "customer-7",
       "X-Campaign": "welcome",
       "List-Unsubscribe": "<https://platform.example.com/u/abc>",
       "List-Unsubscribe-Post": "List-Unsubscribe=One-Click"
@@ -96,7 +95,7 @@ curl -u platform1:$SECRET $API/api/v1/domains
 
 ```
 curl -u platform1:$SECRET -H 'Content-Type: application/json' \
-  -d '{"domain": "customer.example", "selector": "s1", "tenant": "customer-7"}' \
+  -d '{"domain": "customer.example", "selector": "s1"}' \
   $API/api/v1/domains
 ```
 
@@ -104,7 +103,7 @@ curl -u platform1:$SECRET -H 'Content-Type: application/json' \
 |---|---|---|
 | `domain` | yes | lowercase is applied |
 | `selector` | no | default `kumo1` |
-| `tenant` | no | must equal the credential's tenant when it has one |
+| `tenant` | no | omit to use the credential tenant. An explicit value must equal a fixed tenant on the credential |
 | `dkim_private_key` | no | PEM key to import instead of generating one |
 
 In a cluster using local DKIM storage, supply the common key or provision
@@ -153,8 +152,14 @@ stored key. [Cluster DKIM setup](cluster.md#dkim-keys-in-a-cluster)
 
 Submission listener (default port 587), STARTTLS then `AUTH PLAIN` with a
 credential that has the `smtp` scope. Same domain policy and tenant rules
-as the HTTP injection; `X-Tenant`, `X-Campaign` and `X-Message-Ref`
-headers work the same way.
+as HTTP injection. `X-Campaign` selects the campaign and
+`X-Message-Ref` supports message correlation.
+
+The domain API allows 120 authenticated requests per integration per minute.
+Domain creates, deletes and DNS validations share a separate limit of 12 per
+integration and 60 per instance per minute. The API caps active owned domains
+at 100 per integration and 1,000 per instance. Exceeding a limit returns 429.
+OpenBao retains shared DKIM keys after a domain is deleted.
 
 ## NS8 actions
 
@@ -191,7 +196,7 @@ api-cli run module/kumomta1/configure-module --data '{
   "bounce_domain": "bounces.mta.example.org",
   "integrations": [
     {"name": "platform1", "password": "<16+ characters>",
-     "tenant": "", "scopes": ["inject", "smtp", "domains"],
+     "tenant": "customer-7", "scopes": ["inject", "smtp", "domains"],
      "max_message_rate": "5000/h"}
   ]
 }'

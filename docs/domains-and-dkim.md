@@ -22,7 +22,7 @@ curl -u platform1:$SECRET -H 'Content-Type: application/json' \
 |---|---|
 | `domain` | the customer domain (required) |
 | `selector` | DKIM selector, default `kumo1` |
-| `tenant` | tenant of the messages from this domain when the credential has none and no `X-Tenant` is set. A credential bound to a tenant can only use its own |
+| `tenant` | Administrator-assigned tenant for messages sent with an unbound integration credential |
 | `dkim_private_key` | optional PEM private key to import (RSA), instead of generating a 2048-bit RSA key. Never returned |
 
 On a standalone instance the module generates the key and stores it in

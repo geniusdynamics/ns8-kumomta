@@ -190,7 +190,8 @@ large mailbox providers, and the per-domain settings of the module.
 - Clustered: `tsa_enabled` makes the instance a **designated TSA host**,
   chosen when the store is set up or when the instance joins (a join does
   not copy it: it is off unless checked). Only designated hosts run
-  tsa-daemon, on the cluster VPN address, trusting the cluster network.
+  tsa-daemon on the cluster VPN address. The listener allows exact VPN
+  addresses for the KumoMTA instances using the same store.
   Every kumod of the store publishes its log records to all the
   designated hosts (from the peer records) and subscribes to its own
   daemon, or to one designated host when it is not one, as in the KumoMTA
@@ -202,8 +203,9 @@ KumoMTA reads the list of daemons in its `init` event only
 configuration epoch bump does not change it. When a peer joins, leaves or
 changes, it publishes `kumomta-cluster-changed`; each peer of the store
 computes its list again and restarts kumod **only if the list changed**.
-So peers that are not TSA hosts join and leave without restarting anyone
-(the CI checks the PID of kumod).
+A peer that joins or leaves without hosting TSA does not change the
+kumod publishing list. On designated hosts, tsa-daemon restarts if its
+publisher address allowlist changes.
 
 **Changing the designation later is allowed**: it changes the list of
 every peer of the store, so KumoMTA restarts once on each of them (a
@@ -293,11 +295,12 @@ is not offered yet.
   Rotate those credentials when retiring a peer that should lose their use.
   NS8 stores reveal task results under the source module for eight hours,
   accessible to cluster administrators.
-- tsa-daemon has no authentication: kumod's TSA client sends no
-  credentials, so the access is by source address (the cluster network).
-  The port listens on the VPN address only and NS8 accepts the cluster
-  network in firewalld's `trusted` zone: no port is opened to the public
-  zone. Any node of the NS8 cluster can reach it.
+- tsa-daemon authorizes log publishing, shaping downloads and event
+  subscriptions by source address. The allowlist contains the local
+  instance and registered KumoMTA peers using the same throttle store.
+  The listener binds to the VPN address and shares the VPN IP with other
+  processes on that node. The allowlist therefore trusts each admitted
+  node.
 
 ## Restore, clone, upgrade, removal
 

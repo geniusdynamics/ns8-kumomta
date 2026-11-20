@@ -33,7 +33,7 @@ Written in Rust with an asynchronous, event-driven engine, KumoMTA scales vertic
 ### Infrastructure & Hardware Nuances
 * **Sustained vs. Theoretical Speed:** While a 96-core system can ingest or drop 16,667 messages per second against a `dev/null` sink, live delivery speeds are constrained by TLS handshakes, DNS MX resolution latency, and receiving ISP throttling ([InboxTooling — KumoMTA vs. PowerMTA](https://inboxtooling.com)).
 * **Network Bandwidth:** Delivering 1 million messages with an average payload of 50 KB over an 8-hour window transfers roughly **50 GB/hour (~111 Mbps)**, fitting comfortably inside standard 1 Gbps+ cloud networking ([KumoMTA Server Environment Tutorial](https://kumomta.com)).
-* **Storage I/O:** KumoMTA spools message data and metadata using RocksDB. Use dedicated NVMe SSDs so disk write latency does not bottleneck high-concurrency bursts.
+* **Storage I/O:** This module spools message data and metadata with KumoMTA’s LocalDisk backend. Use dedicated NVMe SSDs so disk write latency does not bottleneck high-concurrency bursts.
 * **Real-World Handoff Latency:** In high-volume production migrations, KumoMTA's modern async queue handling has demonstrated rapid SMTP handoffs across major providers, averaging ~1.2s to Gmail, ~2.8s to Microsoft, and ~3.2s to Yahoo ([Postmark — Migrating to KumoMTA](https://postmarkapp.com)).
 
 ---
@@ -183,8 +183,8 @@ local shaper = shaping:setup_with_automation {
 }
 
 kumo.on('init', function()
-  kumo.define_spool { name = 'data', path = '/var/spool/kumomta/data', kind = 'RocksDB' }
-  kumo.define_spool { name = 'meta', path = '/var/spool/kumomta/meta', kind = 'RocksDB' }
+  kumo.define_spool { name = 'data', path = '/var/spool/kumomta/data', kind = 'LocalDisk' }
+  kumo.define_spool { name = 'meta', path = '/var/spool/kumomta/meta', kind = 'LocalDisk' }
 
   kumo.start_esmtp_listener {
     listen = '0.0.0.0:25',

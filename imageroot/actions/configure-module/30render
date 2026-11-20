@@ -11,8 +11,8 @@
 
 import kumomta_ns8 as kumo
 
-settings = kumo.load_settings()
-changed, restart = kumo.write_config(settings)
+with kumo.settings_lock():
+    changed, restart = kumo.write_config(kumo.load_settings())
 if restart:
     open(".restart-required", "w").close()
 elif changed:

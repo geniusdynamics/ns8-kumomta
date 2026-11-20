@@ -49,8 +49,10 @@ or with `configure-module`:
 
 - `name` is the user name, `password` the secret: HTTP basic
   authentication for the HTTP API, SMTP AUTH PLAIN for submission. The
-  module stores a salted SHA-256 hash in a 0600 file; the password is
-  never returned. The UI can generate one in the browser and shows it once.
+  module stores a scrypt verifier in a 0600 file. The UI can generate the
+  password in the browser and shows it once. On upgrade, existing
+  verifiers are wrapped in scrypt and keep accepting the same passwords.
+  Setting a new password creates a direct scrypt verifier.
 - `scopes`:
   - `inject`: `POST /api/inject/v1` (KumoMTA's ACL grants this credential
     nothing else);
@@ -58,10 +60,12 @@ or with `configure-module`:
   - `domains`: the domain management API `/api/v1/*`.
 - `tenant`: when set, every message of the credential gets this KumoMTA
   tenant, whatever the headers say: use it when one credential is one
-  customer. Leave it empty when one credential serves many customers and
-  the platform sets `X-Tenant` itself.
-- `max_message_rate`: optional sending rate of that tenant, e.g. `1000/h`.
-  Messages over the rate wait in their queue; they are not rejected.
+  customer. Leave it empty to use the administrator-assigned domain
+  tenant or a tenant derived from the credential name.
+- `max_message_rate`: optional sending rate, e.g. `1000/h`. Credentials
+  bound to the same tenant share the strictest configured rate. An unbound
+  credential has a separate rate across its domains and campaigns.
+  Messages over the rate wait in their queue.
 
 `api_host` publishes two Traefik routes on that host name, HTTPS only
 (HTTP redirects), with Let's Encrypt when the Settings page asks for it:
@@ -69,8 +73,10 @@ or with `configure-module`:
 restricts them to some networks. Without `api_host`, the platform can use
 SMTP only. Traefik has no rate limiting option for module routes: the
 domain API limits each credential to 120 requests per minute and blocks a
-user name after 20 failed authentications in a minute; KumoMTA itself
-rejects wrong credentials of the injection API with 401.
+known user name after 20 failed authentications in a minute. Domain
+mutations have separate rate limits and active domain quotas. KumoMTA
+rejects invalid injection credentials with 401. Changing, revoking or
+rotating a credential restarts kumod to clear its authentication cache.
 
 ## SMTP or HTTP injection?
 
@@ -94,14 +100,16 @@ customer (tenant) and each campaign gets its own queues: a customer with a
 bad list does not slow down the others, and an administrator can suspend
 or bounce one tenant's queues.
 
-- `X-Tenant: <customer-id>` and `X-Campaign: <campaign-id>` headers (SMTP,
-  or `content.headers` of an injection) set the tenant and the campaign.
-  The module removes these headers before delivery.
-- A credential with a fixed `tenant` overrides `X-Tenant`.
-- A domain added with a `tenant` gives that tenant to the messages of a
-  credential without tenant, when the header is missing.
-- The tenant and the campaign appear in the webhook records (`meta.tenant`,
-  `meta.campaign`, and in `queue`).
+- `X-Campaign` can select a campaign for SMTP or HTTP injection. Use up to
+  64 letters, digits, dots, underscores or hyphens.
+- For integrations, the tenant comes from the credential, an
+  administrator-assigned sending domain, or `ns8-integration-<name>`, in
+  that order. Create a credential per tenant when you need explicit tenant
+  boundaries.
+- SMTP users, clients in trusted relay networks and the internal HTTP
+  administrator can set `X-Tenant` using the same syntax as a campaign.
+- The module strips both routing headers from submitted messages before delivery. The assigned
+  tenant and campaign appear in webhooks and queue names.
 
 ## Sending domain policy
 
@@ -152,7 +160,7 @@ Gmail has no per-message feedback loop: use Google Postmaster Tools.
    records to the customer, then call `.../validate` until it is
    `verified` (for example every few minutes for a day).
 3. Send with `POST /api/inject/v1`, `From:` on a verified domain,
-   `X-Tenant`/`X-Campaign` headers and per-recipient `metadata` with the
+   the `X-Campaign` header and per-recipient `metadata` with the
    platform's message id.
 4. Configure the webhook (Delivery page) with a signing secret, verify the
    signature, and update the message status from `type` and

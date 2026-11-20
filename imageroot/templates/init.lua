@@ -58,6 +58,16 @@ end, {
   invalidate_with_epoch = true,
 })
 
+local cluster_relay_map = kumo.memoize(function()
+  local network = policy_data('relay_hosts.toml').cluster_network
+  return kumo.cidr.make_map(network and { [network] = true } or {})
+end, {
+  name = 'ns8_cluster_relay',
+  ttl = '5 minutes',
+  capacity = 1,
+  invalidate_with_epoch = true,
+})
+
 local function peer_ip(meta_source)
   local received_from = meta_source:get_meta 'received_from'
   if not received_from then
@@ -72,14 +82,23 @@ local function is_trusted(meta_source)
     return true
   end
   local ip = peer_ip(meta_source)
-  if ip and trusted_map()[ip] then
+  if not ip then
+    return false
+  end
+  if trusted_map()[ip] then
     return true
   end
-  return false
+  local relay = policy_data('relay_hosts.toml')
+  local received_via = meta_source:get_meta 'received_via'
+  if not relay.cluster_network or not received_via then
+    return false
+  end
+  local address, port = utils.split_ip_port(received_via)
+  return address == relay.cluster_address and port == '25'
+    and cluster_relay_map()[ip] == true
 end
 
--- Integration credentials of the sending platforms (hashes, tenant,
--- scopes, rate): a 0600 file of the secrets directory
+-- Integration policies (tenant, scopes, rate), from the secrets directory.
 local function integrations()
   return load_toml(SECRETS .. '/integrations.toml').integration or {}
 end
@@ -97,17 +116,32 @@ local function integration_allows(name, scope)
   return nil
 end
 
-local function check_password(entry, password)
-  return entry ~= nil
-    and password ~= nil
-    and password ~= ''
-    and kumo.digest.sha256(entry.salt .. password).hex == entry.sha256
+local auth_client = kumo.http.build_client { timeout = '2 seconds' }
+
+local function verify_password(scope, name, password)
+  if not password or password == '' or INIT.auth_port == '' then
+    return false
+  end
+  local ok, status = pcall(function()
+    return auth_client
+      :post('http://127.0.0.1:' .. INIT.auth_port .. '/_ns8/verify-auth')
+      :header('Content-Type', 'application/json')
+      :header('X-Kumo-Local-Token', kumo.secrets.load(KEYS.api_password))
+      :body(kumo.json_encode { scope = scope, name = name, password = password })
+      :send()
+      :status_code()
+  end)
+  if scope == 'smtp' and (not ok or status == 503) then
+    kumo.reject(454, '4.7.0 authentication temporarily unavailable')
+  end
+  return ok and status == 200
 end
 
 -- Messages of an integration: the From domain must be a sending domain
 -- of this MTA, owned by the integration or by the administrator, and
 -- verified unless require_verified_domains is off. The tenant of the
--- integration, if any, wins over the X-Tenant header.
+-- integration, the administrator-assigned domain tenant, or the
+-- credential name determines the tenant.
 local function apply_integration_policy(msg, name, integ)
   local from = msg:from_header()
   if not from then
@@ -126,26 +160,38 @@ local function apply_integration_policy(msg, name, integ)
     kumo.reject(550, string.format('5.7.1 sending domain %s is not verified', domain))
   end
   local tenant = integ.tenant
-  if (not tenant or tenant == '') and entry.tenant and entry.tenant ~= '' then
-    tenant = entry.tenant
+  if not tenant or tenant == '' then
+    if entry.tenant and entry.tenant ~= '' and (entry.tenant_from_admin or entry.owner == '') then
+      tenant = entry.tenant
+    else
+      tenant = 'ns8-integration-' .. name
+    end
   end
-  if tenant and tenant ~= '' then
-    msg:set_meta('tenant', tenant)
-  end
+  msg:set_meta('tenant', tenant)
+  msg:set_meta('ns8_integration', name)
 end
 
--- X-Tenant and X-Campaign headers select the tenant and campaign of the
--- message (KumoMTA queue name campaign:tenant@domain), and are removed.
--- X-Message-Ref is kept and logged (meta x_message_ref) for correlation.
-local function import_tenant_campaign(msg)
-  msg:import_x_headers { 'x-tenant', 'x-campaign', 'x-message-ref' }
-  local tenant = msg:get_meta 'x_tenant'
-  local campaign = msg:get_meta 'x_campaign'
-  if tenant and tenant ~= '' then
-    msg:set_meta('tenant', tenant)
-  end
-  if campaign and campaign ~= '' then
+-- Only trusted relay/SMTP users and ns8-admin may supply a tenant label.
+-- Integration clients may supply a campaign, within the same syntax and
+-- size used for configured tenants. Both routing headers are stripped.
+local function routing_label(value)
+  return value and #value <= 64 and value:match('^[A-Za-z0-9._-]+$')
+end
+
+local function import_routing_headers(msg, allow_tenant)
+  msg:import_x_headers { 'x-campaign', 'x-message-ref' }
+  local campaign = routing_label(msg:get_meta 'x_campaign')
+  if campaign then
     msg:set_meta('campaign', campaign)
+  end
+  msg:set_meta('x_campaign', nil)
+  if allow_tenant then
+    msg:import_x_headers { 'x-tenant' }
+    local tenant = routing_label(msg:get_meta 'x_tenant')
+    if tenant then
+      msg:set_meta('tenant', tenant)
+    end
+    msg:set_meta('x_tenant', nil)
   end
   msg:remove_x_headers { 'x-tenant', 'x-campaign' }
 end
@@ -225,10 +271,12 @@ end
 kumo.on('init', function()
   kumo.define_spool {
     name = 'data',
+    kind = 'LocalDisk',
     path = '/var/spool/kumomta/data',
   }
   kumo.define_spool {
     name = 'meta',
+    kind = 'LocalDisk',
     path = '/var/spool/kumomta/meta',
   }
 
@@ -325,24 +373,20 @@ kumo.on('http_server_validate_auth_basic', function(user, password)
     return ok and expected ~= '' and password == expected
   end
   -- Integration credentials: acl.toml grants them /api/inject only
-  return check_password(integration_allows(user, 'inject'), password)
+  return integration_allows(user, 'inject') ~= nil
+    and verify_password('inject', user, password)
 end)
 
--- SMTP AUTH PLAIN (only after STARTTLS): salted SHA-256 hashes
-kumo.on('smtp_server_auth_plain', function(authz, authc, password, conn_meta)
-  if password == '' then
-    return false
-  end
+-- SMTP AUTH PLAIN is available after STARTTLS.
+kumo.on('smtp_server_auth_plain', function(authz, authc, password)
   if authz ~= authc then
     return false
   end
   local users = load_toml(SECRETS .. '/smtp_users.toml').user or {}
-  local entry = users[authc]
-  if entry then
-    return check_password(entry, password)
+  if not users[authc] and not integration_allows(authc, 'smtp') then
+    return false
   end
-  -- Integration credentials with the smtp scope
-  return check_password(integration_allows(authc, 'smtp'), password)
+  return verify_password('smtp', authc, password)
 end)
 
 -- Relaying: authenticated clients and trusted networks relay anywhere;
@@ -420,25 +464,28 @@ local function dkim_sign(msg)
 end
 
 kumo.on('smtp_server_message_received', function(msg)
-  if is_trusted(msg) then
-    import_tenant_campaign(msg)
-    local authz = msg:get_meta 'authz_id'
-    local users = load_toml(SECRETS .. '/smtp_users.toml').user or {}
-    if authz and not users[authz] then
-      local integ = integration_allows(authz, 'smtp')
-      if integ then
-        apply_integration_policy(msg, authz, integ)
-      end
-    end
-    dkim_sign(msg)
+  if not is_trusted(msg) then
+    return
   end
+  local authz = msg:get_meta 'authz_id'
+  local users = load_toml(SECRETS .. '/smtp_users.toml').user or {}
+  local is_integration = authz and not users[authz]
+  import_routing_headers(msg, not is_integration)
+  if is_integration then
+    local integ = integration_allows(authz, 'smtp')
+    if not integ then
+      kumo.reject(550, '5.7.1 not authorized to submit')
+    end
+    apply_integration_policy(msg, authz, integ)
+  end
+  dkim_sign(msg)
 end)
 
 kumo.on('http_message_generated', function(msg)
-  import_tenant_campaign(msg)
   local user = msg:get_meta 'http_auth'
-  if user and user ~= 'ns8-admin' then
-    local integ = integration_allows(user, 'inject')
+  import_routing_headers(msg, user == 'ns8-admin')
+  if user ~= 'ns8-admin' then
+    local integ = user and integration_allows(user, 'inject')
     if not integ then
       kumo.reject(550, '5.7.1 not authorized to inject')
     end
@@ -447,20 +494,21 @@ kumo.on('http_message_generated', function(msg)
   dkim_sign(msg)
 end)
 
--- Per-tenant sending rate of the integrations (max_message_rate): the
--- messages wait in their scheduled queue instead of being rejected
+-- Fixed tenants share a throttle across credentials. A credential without
+-- a fixed tenant has its own throttle regardless of domain or campaign.
 kumo.on('throttle_insert_ready_queue', function(msg)
+  local name = msg:get_meta 'ns8_integration'
+  local integ = name and integrations()[name]
   local tenant = msg:get_meta 'tenant'
-  if not tenant or tenant == '' then
-    return
+  local key, rate
+  if integ and (not integ.tenant or integ.tenant == '') then
+    key, rate = 'ns8-integration-' .. name, integ.max_message_rate
+  elseif tenant and tenant ~= '' then
+    key = 'ns8-tenant-' .. tenant
+    rate = (policy_data('tenant_rates.toml').rates or {})[tenant]
   end
-  for name, integ in pairs(integrations()) do
-    if integ.tenant == tenant and integ.max_message_rate and integ.max_message_rate ~= '' then
-      kumo
-        .make_throttle('ns8-tenant-' .. tenant, integ.max_message_rate)
-        :delay_message_if_throttled(msg)
-      return
-    end
+  if rate and rate ~= '' then
+    kumo.make_throttle(key, rate):delay_message_if_throttled(msg)
   end
 end)
 

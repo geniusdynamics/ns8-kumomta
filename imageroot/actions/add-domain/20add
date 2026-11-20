@@ -31,6 +31,7 @@ with kumo.settings_lock():
         field = 'dkim_private_key' if ex.code == 'invalid_private_key' else 'domain'
         json.dump([{'field': field, 'parameter': field, 'value': ex.value, 'error': ex.code}], fp=sys.stdout)
         sys.exit(3)
+    entry["tenant_from_admin"] = True
     kumo.save_settings(settings)
     kumo.apply_policy()
 json.dump(kumo.domain_view(settings, entry), fp=sys.stdout)

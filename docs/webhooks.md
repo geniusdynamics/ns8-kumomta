@@ -131,7 +131,7 @@ a platform needs:
 | `timestamp`, `event_time`, `created` | Unix time and RFC 3339 time of the event, Unix time of the reception |
 | `num_attempts` | delivery attempts so far |
 | `headers` | `Subject` and `Message-ID` of the message |
-| `meta.tenant`, `meta.campaign` | from the credential, the `X-Tenant`/`X-Campaign` headers |
+| `meta.tenant`, `meta.campaign` | from the assigned tenant and the accepted campaign header |
 | `meta.extra` | the per-recipient `metadata` of the HTTP injection, unchanged: put the platform's own message id here to correlate |
 | `meta.x_message_ref` | the `X-Message-Ref` header of the message, if any |
 | `feedback_report` | for `Feedback`: the parsed ARF report (`feedback_type`, `user_agent`, `original_mail_from`, `original_rcpt_to`, `reported_domain`, the original message headers...) |

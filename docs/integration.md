@@ -105,7 +105,8 @@ or bounce one tenant's queues.
 - For integrations, the tenant comes from the credential, an
   administrator-assigned sending domain, or `ns8-integration-<name>`, in
   that order. Create a credential per tenant when you need explicit tenant
-  boundaries.
+  boundaries. After upgrading, tenant labels previously supplied through
+  the domain API give way to this assignment.
 - SMTP users, clients in trusted relay networks and the internal HTTP
   administrator can set `X-Tenant` using the same syntax as a campaign.
 - The module strips both routing headers from submitted messages before delivery. The assigned

@@ -365,11 +365,11 @@ def read_integrations_secrets():
 
 
 def write_integrations(settings, hashes):
-    """Write the credential verifiers and the policy used by KumoMTA."""
+    """Write integration verifiers and policy. Return their change flags."""
     os.makedirs(SECRETS_DIR, mode=0o700, exist_ok=True)
     upgraded = {name: _upgrade_password_hash(cred) for name, cred in hashes.items()}
-    changed = write_file(os.path.join(SECRETS_DIR, "integrations.json"),
-                         json.dumps(upgraded, indent=1, sort_keys=True), 0o600)
+    credentials_changed = write_file(os.path.join(SECRETS_DIR, "integrations.json"),
+                                     json.dumps(upgraded, indent=1, sort_keys=True), 0o600)
     table = {}
     for integ in settings["integrations"]:
         if integ["name"] not in hashes:
@@ -379,9 +379,9 @@ def write_integrations(settings, hashes):
             "scopes": list(integ.get("scopes") or []),
             "max_message_rate": integ.get("max_message_rate") or "",
         }
-    changed |= write_file(os.path.join(SECRETS_DIR, "integrations.toml"),
-                          toml_dumps({"integration": table}), 0o600)
-    return changed
+    policy_changed = write_file(os.path.join(SECRETS_DIR, "integrations.toml"),
+                                toml_dumps({"integration": table}), 0o600)
+    return credentials_changed, policy_changed
 
 
 def read_openbao_env():

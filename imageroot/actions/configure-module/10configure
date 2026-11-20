@@ -240,11 +240,15 @@ if "integrations" in data:
         })
     hashes = new_hashes
     settings["integrations"] = sorted(integrations, key=lambda i: i["name"])
-auth_changed |= kumo.write_integrations(settings, hashes)
-if auth_changed:
+credentials_changed, policy_changed = kumo.write_integrations(settings, hashes)
+old_scopes = {i["name"]: set(i.get("scopes") or []) for i in current["integrations"]}
+new_scopes = {i["name"]: set(i.get("scopes") or []) for i in settings["integrations"]}
+if auth_changed or credentials_changed or old_scopes != new_scopes:
     # The pinned kumod caches HTTP auth for 60 seconds independently of
     # the policy epoch. Restart on credential changes to clear that cache.
     open(".restart-required", "w").close()
+elif policy_changed:
+    open(".reload-required", "w").close()
 
 # DKIM keys of the sending domains. Local mode: generate the missing keys.
 # OpenBao mode: keys are written to OpenBao by generate-dkim-key, so that

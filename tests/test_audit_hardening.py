@@ -38,6 +38,15 @@ class CredentialsTest(unittest.TestCase):
             self.assertNotIn(password, (Path(directory) / "smtp_users.json").read_text())
             self.assertNotIn(upgraded["scrypt"], (Path(directory) / "smtp_users.toml").read_text())
 
+    def test_integration_policy_change_preserves_credential_files(self):
+        integration = {"name": "platform", "scopes": ["inject"], "max_message_rate": "1/h"}
+        settings = {"integrations": [integration]}
+        credentials = {"platform": kumo.hash_password("fixture-password")}
+        with tempfile.TemporaryDirectory() as directory, patch.object(kumo, "SECRETS_DIR", directory):
+            self.assertEqual(kumo.write_integrations(settings, credentials), (True, True))
+            integration["max_message_rate"] = "2/h"
+            self.assertEqual(kumo.write_integrations(settings, credentials), (False, True))
+
     def test_domain_auth_and_local_verifier_apply_independent_scope_checks(self):
         with patch.dict(sys.modules, {"kumomta_ns8": kumo}):
             handler_type = runpy.run_path(str(ROOT / "imageroot/bin/kumomta-api"))["Handler"]

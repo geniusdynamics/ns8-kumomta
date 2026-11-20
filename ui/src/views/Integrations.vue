@@ -122,7 +122,7 @@
               <NsTextInput
                 :label="$t('integrations.tenant')"
                 v-model.trim="integ.tenant"
-                :helper-text="$t('integrations.tenant_helper')"
+                :helper-text="$t('integrations.tenant_assignment_helper')"
                 :disabled="busy"
               />
               <NsTextInput

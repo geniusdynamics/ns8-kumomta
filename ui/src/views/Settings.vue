@@ -138,7 +138,7 @@
             <cv-text-area
               :label="$t('settings.relay_networks')"
               v-model="relayNetworksText"
-              :helper-text="$t('settings.relay_networks_helper')"
+              :helper-text="$t('settings.relay_networks_access_helper')"
               :invalid-message="error.relay_networks"
               :disabled="busy"
               ref="relay_networks"
@@ -153,7 +153,7 @@
               class="mg-bottom"
             >
               <template #tooltip>
-                {{ $t("settings.cluster_relay_tooltip") }}
+                {{ $t("settings.cluster_relay_access_tooltip") }}
               </template>
               <template slot="text-left">{{ $t("common.disabled") }}</template>
               <template slot="text-right">{{ $t("common.enabled") }}</template>
@@ -179,7 +179,7 @@
               kind="info"
               :title="$t('settings.cluster_relay_active')"
               :description="
-                $t('settings.cluster_relay_active_description', {
+                $t('settings.cluster_relay_vpn_description', {
                   network: cluster_network,
                   address: node_address,
                 })
@@ -329,7 +329,7 @@ export default {
       submission_port: 587,
       max_message_size: 25,
       relayNetworksText: "",
-      cluster_relay: true,
+      cluster_relay: false,
       cluster_relay_active: false,
       sink_enabled: false,
       cluster_network: "",

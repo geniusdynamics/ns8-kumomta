@@ -199,38 +199,37 @@ else:
         settings["cluster_valkey"] = ""
 
 # The metrics password is checked by kumod itself: always a local file
+auth_changed = False
 if data.get("metrics_password"):
-    kumo.write_secret("metrics_password", data["metrics_password"])
+    auth_changed |= kumo.write_secret("metrics_password", data["metrics_password"])
 if not settings["metrics_host"] and "metrics_host" in data:
-    kumo.remove_secret("metrics_password")
+    auth_changed |= kumo.remove_secret("metrics_password")
 settings["metrics_password_set"] = bool(kumo.read_secret("metrics_password"))
 
-# SMTP AUTH users: salted SHA-256, the list replaces the current one
+# SMTP AUTH users: the list replaces the current one
 if "smtp_users" in data:
     known = kumo.read_smtp_users()
     users = {}
     for user in data["smtp_users"]:
         name = user["username"]
         if user.get("password"):
-            salt, digest = kumo.hash_password(user["password"])
-            users[name] = {"salt": salt, "sha256": digest}
+            users[name] = kumo.hash_password(user["password"])
         elif name in known:
             users[name] = known[name]
-    kumo.write_smtp_users(users)
     settings["smtp_users"] = sorted(users)
-elif not os.path.exists(os.path.join(kumo.SECRETS_DIR, "smtp_users.toml")):
-    kumo.write_smtp_users({})
+else:
+    users = kumo.read_smtp_users()
+auth_changed |= kumo.write_smtp_users(users)
 
-# Integration credentials of the sending platforms: salted SHA-256, the
-# list replaces the current one. Always local: kumod checks them itself.
+# Integration credentials of the sending platforms: the list replaces the
+# current one. The local verifier reads them from the secrets directory.
 hashes = kumo.read_integrations_secrets()
 if "integrations" in data:
     new_hashes, integrations = {}, []
     for integ in data["integrations"]:
         name = integ["name"]
         if integ.get("password"):
-            salt, digest = kumo.hash_password(integ["password"])
-            new_hashes[name] = {"salt": salt, "sha256": digest}
+            new_hashes[name] = kumo.hash_password(integ["password"])
         elif name in hashes:
             new_hashes[name] = hashes[name]
         integrations.append({
@@ -241,7 +240,14 @@ if "integrations" in data:
         })
     hashes = new_hashes
     settings["integrations"] = sorted(integrations, key=lambda i: i["name"])
-if kumo.write_integrations(settings, hashes):
+credentials_changed, policy_changed = kumo.write_integrations(settings, hashes)
+old_scopes = {i["name"]: set(i.get("scopes") or []) for i in current["integrations"]}
+new_scopes = {i["name"]: set(i.get("scopes") or []) for i in settings["integrations"]}
+if auth_changed or credentials_changed or old_scopes != new_scopes:
+    # The pinned kumod caches HTTP auth for 60 seconds independently of
+    # the policy epoch. Restart on credential changes to clear that cache.
+    open(".restart-required", "w").close()
+elif policy_changed:
     open(".reload-required", "w").close()
 
 # DKIM keys of the sending domains. Local mode: generate the missing keys.

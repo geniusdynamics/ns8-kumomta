@@ -8,11 +8,11 @@
 # SMTP checks run on the test node:
 #   smtp_check.py banner HOST PORT
 #   smtp_check.py submit HOST PORT USER PASSWORD FROM TO
-#   smtp_check.py badauth HOST PORT USER
+#   smtp_check.py badauth HOST PORT USER [PASSWORD]
 #   smtp_check.py relay HOST PORT FROM TO     (expects relaying denied)
 #   smtp_check.py rcpt HOST PORT FROM TO [SOURCE_IP]
 #       prints the RCPT TO reply code, sends no message
-#   smtp_check.py submit-plain HOST PORT FROM TO  (no AUTH, e.g. loopback)
+#   smtp_check.py submit-plain HOST PORT FROM TO  (explicitly trusted source)
 
 import smtplib
 import socket
@@ -46,14 +46,15 @@ if cmd == "submit":
 
 if cmd == "badauth":
     user = sys.argv[4]
+    password = sys.argv[5] if len(sys.argv) > 5 else "wrong-password-123"
     with smtplib.SMTP(host, port, timeout=30) as smtp:
         smtp.starttls(context=ctx)
         try:
-            smtp.login(user, "wrong-password-123")
+            smtp.login(user, password)
         except smtplib.SMTPAuthenticationError as ex:
             print("rejected", ex.smtp_code)
             sys.exit(0)
-    print("login accepted with a wrong password")
+    print("login unexpectedly accepted")
     sys.exit(1)
 
 if cmd == "relay":

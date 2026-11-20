@@ -75,7 +75,7 @@ api-cli run configure-module --agent module/kumomta1 --data - <<EOF
   "submission_enabled": true,
   "submission_port": 587,
   "relay_networks": ["192.168.1.0/24"],
-  "cluster_relay": true,
+  "cluster_relay": false,
   "smtp_users": [{"username": "app1", "password": "Secret,1234"}],
   "domains": [{"domain": "example.org", "selector": "kumo1"}],
   "inbound_routes": [{"domain": "example.org", "host": "10.5.4.1", "port": 25}],
@@ -92,7 +92,7 @@ field. Secrets (`smtp_users[].password`, `smarthost_password`,
 `webhook_token`, `webhook_signing_secret`, `vault_token`,
 `metrics_password`, `integrations[].password`) are write only:
 `get-configuration` returns `*_set` markers instead, and SMTP user
-passwords are kept as salted SHA-256 hashes.
+and integration passwords are kept as scrypt verifiers.
 
 Integration settings: `integrations`, `api_host`, `api_allowlist`,
 `require_verified_domains`, `spf_include`, `bounce_domain`,
@@ -168,26 +168,27 @@ same port conflict check as 25 and 587.
 An integration credential (Integrations page, `integrations` of
 `configure-module`) is a user name and a password with scopes: `inject`
 (HTTP injection), `smtp` (SMTP AUTH) and `domains` (domain API), an
-optional tenant and sending rate. Its salted SHA-256 hash is in
-`state/secrets/integrations.*` (0600); kumod checks it in
-`http_server_validate_auth_basic` and `smtp_server_auth_plain`, and the
-rendered `acl.toml` grants it `/api/inject` only. The `ns8-admin` user of
-the module stays on the loopback.
+optional tenant and sending rate. The scrypt verifier lives in
+`state/secrets/integrations.json` (0600). Kumod checks the scope and sends
+the password to the module's token-protected loopback verifier. The
+rendered `acl.toml` grants the inject scope access to `/api/inject`.
 
 With `api_host`, `configure-module` publishes two Traefik routes on that
 host name, HTTPS only: `/api/inject` to kumod and `/api/v1` to
 `kumomta-api.service`, a small Python daemon on the second TCP port of the
 module (127.0.0.1) that serves the domain API with the same credentials.
 The daemon, the domain actions and `configure-module` share the settings
-under a file lock; a change re-renders the policy and bumps the
-configuration epoch.
+under a file lock. Changed policy files are replaced atomically and then
+applied with a configuration epoch bump. Credential changes restart kumod
+to clear its HTTP authentication cache.
 
 Messages of an integration must come `From:` a sending domain of the MTA,
 owned by it or by the administrator, and verified (DKIM and SPF found in
-the DNS) while `require_verified_domains` is on. `X-Tenant` and
-`X-Campaign` set the KumoMTA tenant and campaign (per-customer queues), a
-tenant bound to the credential wins, and `max_message_rate` throttles the
-tenant. The log records and the webhook carry `meta.tenant`,
+the DNS) while `require_verified_domains` is on. The credential or an
+administrator-assigned domain determines the tenant. Integrations can
+set `X-Campaign`. The module strips both routing headers before delivery.
+`max_message_rate` applies to the fixed tenant or to the unbound credential.
+The log records and the webhook carry `meta.tenant`,
 `meta.campaign` and the per-recipient injection `metadata` (`meta.extra`),
 with the IANA `bounce_classification`. With `bounce_domain`, the inbound
 listener accepts mail for it and for `bounces.<sending domain>` and logs
@@ -267,19 +268,16 @@ and the manual URL remains the fallback.
 
 The core "Email notifications" settings (`cluster/get-smarthost`) list the
 modules publishing `module/<id>/srv/tcp/submission`, and configure the
-chosen one with its host, port 25, no TLS and no authentication. With
-`cluster_relay` the module publishes that key with the VPN address of the
-node and trusts the cluster network for relaying. This works only with the
-inbound listener on port 25; in outbound-only mode or on another port the
-key is removed, since the core would configure a port nobody listens on.
-Other applications can use the same address, or a submission user.
+chosen one with its host and port 25. This connection uses no TLS or SMTP
+authentication. When `cluster_relay` is enabled, the module publishes its
+VPN address and allows VPN clients to relay through that address on port
+25. The server withdraws the service when the relay is disabled or port
+25 is unavailable.
 
-The cluster relay is on by default. The "Offer as smarthost to the
-cluster" toggle of the Settings page (`"cluster_relay": false`) turns it
-off: the cluster network leaves `relay_hosts.toml` and the
-`srv/tcp/submission` key is deleted, so `cluster/get-smarthost` no longer
-lists the module and unauthenticated mail from the cluster addresses can
-only reach the inbound domains.
+Cluster relay defaults to off on new installations. Existing installations
+keep their saved setting. Use the Settings toggle to opt in. Applications
+can also use authenticated submission or a source IP explicitly listed
+under `relay_networks`. Loopback relaying requires that same opt-in.
 
 ### Sink mode (testing)
 
@@ -300,18 +298,26 @@ a warning banner on every page and `get-configuration` returns a
 closes every minute) with the `tailer` tool of the image. Log segments are
 kept 7 days (`kumomta-logs-cleanup.timer`).
 
+### Memory pressure
+
+The pinned KumoMTA release derives its memory thresholds from the runtime
+cgroup limit, process limit or physical RAM. SMTP and HTTP injection apply
+back-pressure when memory headroom is exhausted. The `memory_limit` and
+`memory_usage` metrics show the effective threshold and working set.
+
 ### Backup
 
 `state-include.conf` covers `settings.json`, `secrets/`, `openbao.env`,
 `dkim/` (the integration credentials are under `secrets/`), the rendered
-policy and the `kumomta-spool` volume. Before the
-backup `module-dump-state` asks kumod to flush its RocksDB spool. Restore
-and clone call `configure-module` with every setting and `lets_encrypt`
-off.
+policy and the `kumomta-spool` volume. The spool uses KumoMTA's
+`LocalDisk` backend. A live backup can overlap with queue writes and
+deletions. Stop kumod before the backup when a point-in-time queue copy is
+required. Restore and clone call `configure-module` with every setting
+and `lets_encrypt` off.
 
 ### Image
 
-`ghcr.io/kumocorp/kumomta`, pinned to the newest stable release. KumoMTA
+`ghcr.io/kumocorp/kumomta`, pinned to a stable release. KumoMTA
 publishes dated stable releases (`2026.09.29-b90d8bc1`) matching its
 GitHub releases; `latest`, `main` and `dev` are floating and are not used.
 `renovate.json` compares these tags with a regex versioning. The module

@@ -40,7 +40,7 @@ config["api_endpoints"] = {
 cnet, node_address = kumo.cluster_info()
 config["cluster_network"] = cnet or ""
 config["node_address"] = node_address or ""
-config["cluster_relay_active"] = kumo.offers_cluster_relay(settings)
+config["cluster_relay_active"] = bool(kumo.cluster_relay_policy(settings))
 try:
     config["mail_modules"] = sorted(kumo.mail_modules_on_node())
 except Exception:

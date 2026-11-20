@@ -6,12 +6,12 @@
 #
 # Sending domain management API of the integrations (kumomta-api), on
 # 127.0.0.1, second TCP port of the module. Traefik routes /api/v1 of the
-# API host name here. It authenticates the integration credentials itself.
+# API host name here. This service also verifies SMTP and HTTP injection
+# credentials over a separate, token-protected loopback endpoint.
 #
 
 [Unit]
 Description=KumoMTA domain management API for sending platforms
-After=kumomta.service
 
 [Service]
 EnvironmentFile=%S/state/environment

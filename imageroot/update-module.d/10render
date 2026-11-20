@@ -8,10 +8,12 @@
 # The new image may bring a new policy template: render it again before
 # 20restart restarts kumod
 
-import os
 import kumomta_ns8 as kumo
 
-settings = kumo.load_settings()
-if settings["hostname"]:
-    kumo.ensure_api_credentials()
-    kumo.write_config(settings)
+with kumo.settings_lock():
+    settings = kumo.load_settings()
+    if settings["hostname"]:
+        kumo.ensure_api_credentials()
+        kumo.write_smtp_users(kumo.read_smtp_users())
+        kumo.write_integrations(settings, kumo.read_integrations_secrets())
+        kumo.write_config(settings)

@@ -21,14 +21,14 @@ import kumomta_ns8 as kumo
 settings = kumo.load_settings()
 agent_id = os.environ['AGENT_ID']
 key = agent_id + "/srv/tcp/submission"
-_, node_address = kumo.cluster_info()
+relay = kumo.cluster_relay_policy(settings)
 
 with agent.redis_connect(privileged=True) as prdb:
     trx = prdb.pipeline()
     trx.delete(key)
-    if kumo.offers_cluster_relay(settings) and node_address:
+    if relay:
         trx.hset(key, mapping={
-            "host": node_address,
+            "host": relay["cluster_address"],
             "port": str(settings["inbound_port"]),
             "node": os.environ['NODE_ID'],
             "module_uuid": os.environ.get('MODULE_UUID', ''),

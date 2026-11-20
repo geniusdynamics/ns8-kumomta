@@ -25,9 +25,12 @@ import secrets
 import string
 import subprocess
 import sys
+import tempfile
+import threading
 import time
 import urllib.error
 import urllib.request
+from fractions import Fraction
 
 import agent
 
@@ -88,7 +91,7 @@ DEFAULTS = {
     "submission_port": 587,
     "max_message_size": 25,           # MiB
     "relay_networks": [],
-    "cluster_relay": True,
+    "cluster_relay": False,
     "smtp_users": [],                 # names only, hashes in secrets
     "domains": [],                    # [{domain, selector}]
     "inbound_routes": [],             # [{domain, host, port}]
@@ -222,12 +225,15 @@ def write_file(path, content, mode=0o644):
     except FileNotFoundError:
         pass
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    tmp = f"{path}.{os.getpid()}.tmp"
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
-    with os.fdopen(fd, "wb") as fp:
-        fp.write(content)
-    os.chmod(tmp, mode)
-    os.replace(tmp, path)
+    fd, tmp = tempfile.mkstemp(prefix=f".{os.path.basename(path)}.", dir=os.path.dirname(path) or ".")
+    try:
+        with os.fdopen(fd, "wb") as fp:
+            fp.write(content)
+            os.fchmod(fp.fileno(), mode)
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
     return True
 
 
@@ -268,13 +274,69 @@ def ensure_api_credentials():
     write_file(API_ENV, f"KUMO_API_USER={API_USER}\nKUMO_API_PASSWORD={password}\n", 0o600)
 
 
-def hash_password(password, salt=None):
-    salt = salt or secrets.token_hex(16)
-    return salt, hashlib.sha256((salt + password).encode()).hexdigest()
+# scrypt uses about 32 MiB per calculation. Limit concurrent verifications
+# in the API daemon and cache only successful results with a bounded LRU.
+_verification_slots = threading.BoundedSemaphore(2)
+_password_cache_lock = threading.Lock()
+_password_cache = {}
+_password_cache_key = secrets.token_bytes(32)
+
+
+def _scrypt(value, salt):
+    return hashlib.scrypt(value, salt=bytes.fromhex(salt), n=32768, r=8, p=3,
+                          maxmem=64 * 1024**2).hex()
+
+
+def hash_password(password):
+    salt = secrets.token_hex(16)
+    return {"salt": salt, "scrypt": _scrypt(password.encode(), salt)}
+
+
+def _upgrade_password_hash(cred):
+    if "scrypt" in cred:
+        return cred
+    # Strengthen existing verifiers using the old digest as the input.
+    # Verification can derive that same digest from the original password.
+    salt = secrets.token_hex(16)
+    return {"salt": salt, "scrypt": _scrypt(bytes.fromhex(cred["sha256"]), salt),
+            "legacy_salt": cred["salt"]}
+
+
+class PasswordVerifierBusy(Exception):
+    pass
+
+
+def check_password(cred, password):
+    if not cred or not password:
+        return False
+    value = password.encode()
+    if "scrypt" not in cred:
+        # A legacy backup can be read before its first configure or upgrade.
+        digest = hashlib.sha256(cred["salt"].encode() + value).hexdigest()
+        return hmac.compare_digest(digest, cred["sha256"])
+    if "legacy_salt" in cred:
+        value = hashlib.sha256(cred["legacy_salt"].encode() + value).digest()
+    cache_key = (cred["salt"], cred["scrypt"], hmac.digest(_password_cache_key, value, "sha256"))
+    with _password_cache_lock:
+        if _password_cache.pop(cache_key, None):
+            _password_cache[cache_key] = True
+            return True
+    if not _verification_slots.acquire(timeout=0.5):
+        raise PasswordVerifierBusy
+    try:
+        valid = hmac.compare_digest(_scrypt(value, cred["salt"]), cred["scrypt"])
+    finally:
+        _verification_slots.release()
+    if valid:
+        with _password_cache_lock:
+            _password_cache[cache_key] = True
+            if len(_password_cache) > 128:
+                del _password_cache[next(iter(_password_cache))]
+    return valid
 
 
 def read_smtp_users():
-    """{username: {salt, sha256}} from the 0600 secrets file"""
+    """SMTP verifiers from the 0600 secrets file."""
     try:
         with open(os.path.join(SECRETS_DIR, "smtp_users.json")) as fp:
             return json.load(fp)
@@ -284,16 +346,17 @@ def read_smtp_users():
 
 def write_smtp_users(users):
     os.makedirs(SECRETS_DIR, mode=0o700, exist_ok=True)
+    upgraded = {name: _upgrade_password_hash(cred) for name, cred in users.items()}
     changed = write_file(os.path.join(SECRETS_DIR, "smtp_users.json"),
-                         json.dumps(users, indent=1, sort_keys=True), 0o600)
-    # The TOML copy is the one read by KumoMTA
-    toml = {name: {"salt": u["salt"], "sha256": u["sha256"]} for name, u in sorted(users.items())}
-    changed |= write_file(os.path.join(SECRETS_DIR, "smtp_users.toml"), toml_dumps({"user": toml}), 0o600)
+                         json.dumps(upgraded, indent=1, sort_keys=True), 0o600)
+    # Lua only needs to distinguish SMTP users from integration identities.
+    changed |= write_file(os.path.join(SECRETS_DIR, "smtp_users.toml"),
+                          toml_dumps({"user": {name: True for name in sorted(users)}}), 0o600)
     return changed
 
 
 def read_integrations_secrets():
-    """{name: {salt, sha256}} of the integration credentials (0600)"""
+    """Integration verifiers from the 0600 secrets file."""
     try:
         with open(os.path.join(SECRETS_DIR, "integrations.json")) as fp:
             return json.load(fp)
@@ -302,34 +365,23 @@ def read_integrations_secrets():
 
 
 def write_integrations(settings, hashes):
-    """Write the credentials and their policy for KumoMTA (0600 TOML)"""
+    """Write integration verifiers and policy. Return their change flags."""
     os.makedirs(SECRETS_DIR, mode=0o700, exist_ok=True)
-    changed = write_file(os.path.join(SECRETS_DIR, "integrations.json"),
-                         json.dumps(hashes, indent=1, sort_keys=True), 0o600)
+    upgraded = {name: _upgrade_password_hash(cred) for name, cred in hashes.items()}
+    credentials_changed = write_file(os.path.join(SECRETS_DIR, "integrations.json"),
+                                     json.dumps(upgraded, indent=1, sort_keys=True), 0o600)
     table = {}
     for integ in settings["integrations"]:
-        cred = hashes.get(integ["name"])
-        if not cred:
+        if integ["name"] not in hashes:
             continue
         table[integ["name"]] = {
-            "salt": cred["salt"],
-            "sha256": cred["sha256"],
             "tenant": integ.get("tenant") or "",
             "scopes": list(integ.get("scopes") or []),
             "max_message_rate": integ.get("max_message_rate") or "",
         }
-    changed |= write_file(os.path.join(SECRETS_DIR, "integrations.toml"),
-                          toml_dumps({"integration": table}), 0o600)
-    return changed
-
-
-def check_integration_password(name, password):
-    """True if name/password is a valid integration credential"""
-    cred = read_integrations_secrets().get(name)
-    if not cred or not password:
-        return False
-    _, digest = hash_password(password, cred["salt"])
-    return hmac.compare_digest(digest, cred["sha256"])
+    policy_changed = write_file(os.path.join(SECRETS_DIR, "integrations.toml"),
+                                toml_dumps({"integration": table}), 0o600)
+    return credentials_changed, policy_changed
 
 
 def read_openbao_env():
@@ -495,6 +547,20 @@ def offers_cluster_relay(settings):
     authentication: kumomta can be offered only with its port-25 listener"""
     return bool(settings["cluster_relay"] and settings["inbound_enabled"]
                 and int(settings["inbound_port"]) == 25)
+
+
+def cluster_relay_policy(settings):
+    if not offers_cluster_relay(settings):
+        return {}
+    network, address = cluster_info()
+    try:
+        vpn = ipaddress.ip_network(network, strict=False)
+        local = ipaddress.ip_address(address)
+    except ValueError:
+        return {}
+    if local not in vpn:
+        return {}
+    return {"cluster_network": str(vpn), "cluster_address": str(local)}
 
 
 # --------------------------------------------------------------------------
@@ -864,11 +930,11 @@ def add_domain(settings, domain, selector="", owner="", tenant="", pem=None):
     settings_lock() and saves the settings. Raises DomainError"""
     domain = (domain or "").lower().rstrip(".")
     selector = (selector or "kumo1").lower()
-    if not DOMAIN_RE.match(domain) or domain.startswith("*."):
+    if not HOSTNAME_RE.fullmatch(domain):
         raise DomainError("invalid_domain", domain)
-    if not SELECTOR_RE.match(selector):
+    if not SELECTOR_RE.fullmatch(selector):
         raise DomainError("invalid_selector", selector)
-    if not TENANT_RE.match(tenant or ""):
+    if not TENANT_RE.fullmatch(tenant or ""):
         raise DomainError("invalid_tenant", tenant)
     if find_domain(settings, domain):
         raise DomainError("domain_exists", domain)
@@ -878,7 +944,8 @@ def add_domain(settings, domain, selector="", owner="", tenant="", pem=None):
         log(agent.SD_ERR + str(ex))
         raise DomainError("openbao_write_failed", domain) from None
     entry = {"domain": domain, "selector": selector, "owner": owner or "",
-             "tenant": tenant or "", "status": "pending", "last_checked": "", "checks": []}
+             "tenant": tenant or "", "status": "pending", "last_checked": "", "checks": [],
+             "registration_id": secrets.token_hex(16)}
     settings["domains"] = sorted(settings["domains"] + [entry], key=lambda d: d["domain"])
     return entry
 
@@ -1008,21 +1075,36 @@ def validate_domains(names=None, owner=None):
     """Validate the given domains (all if names is None; only those of
     owner if set) without holding the lock during the DNS queries, then
     store the results and apply the policy. Return the domain views."""
+    def domain_snapshot(domain):
+        _, public_path = dkim_paths(domain["domain"], domain["selector"])
+        return (domain.get("registration_id"), domain["selector"], domain.get("owner") or "",
+                _dkim_file(public_path))
+
     settings = load_settings()
     targets = [copy.deepcopy(d) for d in settings["domains"]
                if (names is None or d["domain"] in names)
                and (owner is None or (d.get("owner") or "") == owner)]
+    snapshots = {d["domain"]: domain_snapshot(d) for d in targets}
     results = {d["domain"]: validate_domain(settings, d) for d in targets}
+    checked = []
     with settings_lock():
-        settings = load_settings()
-        for dom in settings["domains"]:
-            res = results.get(dom["domain"])
-            if res and res["selector"] == dom["selector"]:
+        current = load_settings()
+        if (spf_mechanism(current), current["bounce_domain"]) != (spf_mechanism(settings), settings["bounce_domain"]):
+            return []
+        policy_changed = False
+        for dom in current["domains"]:
+            name = dom["domain"]
+            if name in results and snapshots[name] == domain_snapshot(dom):
+                result = results[name]
+                policy_changed |= (dom.get("status") == "verified") != (result["status"] == "verified")
                 for key in ("status", "last_checked", "checks"):
-                    dom[key] = res[key]
-        save_settings(settings)
-        apply_policy()
-    return [domain_view(settings, d) for d in settings["domains"] if d["domain"] in results]
+                    dom[key] = result[key]
+                checked.append(domain_view(current, dom))
+        if checked:
+            save_settings(current)
+            if policy_changed:
+                apply_policy()
+    return checked
 
 
 # --------------------------------------------------------------------------
@@ -1311,20 +1393,35 @@ def designated_tsa_hosts(identity):
     return hosts
 
 
-def tsa_peers(settings, identity):
-    """TSA URLs of the other peers with the same store"""
-    urls = []
+def tsa_peers(identity, network):
+    """Verified VPN addresses and designated TSA endpoints for this store."""
+    addresses, urls = set(), []
+    if not network:
+        return addresses, urls
     try:
-        records = service_records(CLUSTER_SERVICE)
+        vpn = ipaddress.ip_network(network, strict=False)
+        modules = kumomta_modules()
+        with agent.redis_connect(use_replica=True, socket_timeout=5, socket_connect_timeout=5) as rdb:
+            for module_id, rec in sorted(service_records(CLUSTER_SERVICE).items()):
+                node = modules.get(module_id)
+                if (module_id == os.environ.get("MODULE_ID") or not node
+                        or not re.fullmatch(r"kumomta[0-9]+", module_id)
+                        or not rec.get("module_uuid") or rec.get("store") != identity):
+                    continue
+                address = rdb.hget(f"node/{node}/vpn", "ip_address")
+                if not address or address != rec.get("host") or not is_ip_address(address):
+                    continue
+                if ipaddress.ip_address(address) not in vpn:
+                    continue
+                addresses.add(address)
+                port = rec.get("port") or ""
+                if _truthy(rec.get("tsa", "")) and port.isdecimal() and 0 < int(port) <= 65535:
+                    host = f"[{address}]" if ":" in address else address
+                    urls.append(f"http://{host}:{int(port)}")
     except Exception as ex:
         log(agent.SD_WARNING + f"Cannot read the cluster records: {ex}")
-        return urls
-    for module_id, rec in sorted(records.items()):
-        if module_id == os.environ.get("MODULE_ID") or rec.get("store") != identity:
-            continue
-        if _truthy(rec.get("tsa", "")) and rec.get("host") and rec.get("port"):
-            urls.append(f"http://{rec['host']}:{int(rec['port'])}")
-    return urls
+        return set(), []
+    return addresses, urls
 
 
 def _cluster_local(state, previous, reason, immediate):
@@ -1337,6 +1434,7 @@ def _cluster_local(state, previous, reason, immediate):
         kept = dict(previous)
         kept.update({"failures": failures, "tsa_listen": state["tsa_listen"],
                      "tsa_publish": state["tsa_publish"], "tsa_subscribe": state["tsa_subscribe"],
+                     "tsa_trusted_hosts": state["tsa_trusted_hosts"],
                      "tsa_reachable": state.get("tsa_reachable", 0)})
         return kept
     state.update({"mode": "local", "reason": reason, "redis": None, "failures": failures})
@@ -1354,24 +1452,28 @@ def evaluate_cluster(settings, fetch=True, immediate=False):
     previous = read_cluster_state()
     port = tsa_port()
     state = {"mode": "standalone", "reason": "", "store": "", "store_label": "", "redis": None,
-             "tsa_listen": "", "tsa_publish": [], "tsa_subscribe": [], "failures": 0}
+             "tsa_listen": "", "tsa_publish": [], "tsa_subscribe": [], "tsa_trusted_hosts": [], "failures": 0}
     if not clustered(settings):
         if settings["tsa_enabled"] and port:
             url = f"http://127.0.0.1:{port}"
-            state.update({"tsa_listen": f"127.0.0.1:{port}", "tsa_publish": [url], "tsa_subscribe": [url]})
+            state.update({"tsa_listen": f"127.0.0.1:{port}", "tsa_publish": [url],
+                          "tsa_subscribe": [url], "tsa_trusted_hosts": ["127.0.0.1"]})
         return state
 
     identity = store_identity(settings)
     state["store"] = identity
-    _, address = cluster_info()
+    network, address = cluster_info()
     own = ""
-    if settings["tsa_enabled"] and port and address:
-        own = f"http://{address}:{port}"
-        state["tsa_listen"] = f"{address}:{port}"
+    if settings["tsa_enabled"] and port and address and is_ip_address(address):
+        host = f"[{address}]" if ":" in address else address
+        state["tsa_listen"] = f"{host}:{port}"
+        own = f"http://{state['tsa_listen']}"
     # kumod publishes to the designated TSA hosts only, and subscribes to
     # its own daemon (or to one of them): peers without TSA joining or
     # leaving leave these lists, and kumod, untouched
-    peers = tsa_peers(settings, identity)
+    addresses, peers = tsa_peers(identity, network)
+    if own:
+        state["tsa_trusted_hosts"] = sorted(addresses | {address})
     state["tsa_publish"] = ([own] if own else []) + peers
     state["tsa_subscribe"] = [own] if own else peers[:1]
     state["tsa_reachable"] = tsa_reachable(state["tsa_publish"]) if peers else int(bool(own))
@@ -1539,6 +1641,11 @@ def cluster_check(prestart=False, immediate=False):
         changed, restart = write_config(current)
     if prestart:
         return state
+    if state.get("tsa_listen") != previous.get("tsa_listen"):
+        apply_cluster_services(current, state)
+    elif state.get("tsa_listen") and tsa_restart_required():
+        if systemctl("restart", "kumomta-tsa.service") == 0:
+            stamp_tsa()
     if previous.get("mode") != state.get("mode"):
         if state.get("mode") == "local":
             log(agent.SD_WARNING + cluster_warnings(settings, state)[0]["message"])
@@ -1664,6 +1771,7 @@ def init_settings(settings):
     init = {
         "hostname": settings["hostname"],
         "http_listen": f"127.0.0.1:{os.environ.get('TCP_PORT', '8000')}",
+        "auth_port": daemon_port(),
         "listeners": listeners,
         "max_message_size": int(settings["max_message_size"]) * 1024 * 1024,
         "tls_certificate": f"{C_TLS}/cert.pem",
@@ -1689,22 +1797,16 @@ def init_settings(settings):
     return init
 
 
-def render_tsa_init(settings, template_dir):
-    """Policy of tsa-daemon, or None when this instance runs none. A
-    clustered daemon listens on the cluster VPN address and trusts the
-    cluster network, so peers joining or leaving need no restart of it:
-    kumod sends no credentials to tsa-daemon, the trust is the source
-    address, and NS8 accepts the cluster network in the trusted zone."""
+def render_tsa_init(template_dir):
+    """Startup-only TSA listener and exact publisher addresses."""
     state = read_cluster_state()
     if not state.get("tsa_listen"):
         return None
-    trusted = ["127.0.0.1", "::1"]
-    if clustered(settings):
-        cnet, address = cluster_info()
-        if cnet:
-            trusted.append(normalize_network(cnet))
-        elif address:
-            trusted.append(address)
+    trusted = state.get("tsa_trusted_hosts")
+    if not trusted:
+        # On upgrade the old state has no address list. Permit only this
+        # node until the cluster check discovers verified peer addresses.
+        trusted = [state["tsa_listen"].rpartition(":")[0].strip("[]")]
     with open(os.path.join(template_dir, "tsa_init.lua")) as fp:
         template = fp.read()
     generated = f"local TSA = {lua_value({'listen': state['tsa_listen'], 'trusted_hosts': trusted})}\n"
@@ -1742,7 +1844,7 @@ def render(settings, template_path=None):
         f"local KEYS = {lua_value(keys)}\n"
     )
     files = {"init.lua": template.replace("--@@GENERATED@@", generated)}
-    tsa_init = render_tsa_init(settings, os.path.dirname(template_path))
+    tsa_init = render_tsa_init(os.path.dirname(template_path))
     if tsa_init:
         files["tsa_init.lua"] = tsa_init
     with open(os.path.join(os.path.dirname(template_path), "acl.toml")) as fp:
@@ -1763,17 +1865,22 @@ def render(settings, template_path=None):
         listener_domains[route["domain"]] = {"relay_to": True}
     files["listener_domains.toml"] = toml_dumps(listener_domains, header=head + "\nDomains accepted from anyone and relayed to their inbound route.")
 
-    # Trusted networks: relaying without authentication
-    networks = ["127.0.0.0/8", "::1/128"] + list(settings["relay_networks"])
-    if offers_cluster_relay(settings):
-        cnet, _ = cluster_info()
-        if cnet:
-            networks.append(normalize_network(cnet))
-    seen = []
-    for net in networks:
-        if net not in seen:
-            seen.append(net)
-    files["relay_hosts.toml"] = toml_dumps({"networks": seen}, header=head + "\nClients of these networks relay without SMTP AUTH.")
+    # Explicit relay networks are opt-in. The NS8 smarthost trust also
+    # requires the local VPN address on port 25.
+    relay = {"networks": list(dict.fromkeys(settings["relay_networks"]))}
+    relay.update(cluster_relay_policy(settings))
+    files["relay_hosts.toml"] = toml_dumps(relay, header=head + "\nClients of these networks relay without SMTP AUTH.")
+
+    # Pick the strictest rate when several credentials share a fixed tenant.
+    tenant_rates = {}
+    for integ in sorted(settings["integrations"], key=lambda item: item["name"]):
+        tenant, rate = integ.get("tenant"), integ.get("max_message_rate")
+        if tenant and rate:
+            amount, period = rate.split("/")
+            seconds = {"s": 1, "m": 60, "h": 3600, "d": 86400}[period[0]]
+            candidate = (Fraction(int(amount), seconds), rate)
+            tenant_rates[tenant] = min(candidate, tenant_rates.get(tenant, candidate))
+    files["tenant_rates.toml"] = toml_dumps({"rates": {key: rate for key, (_, rate) in tenant_rates.items()}}, header=head)
 
     # Egress sources and pool
     ip_sources, ip_pool, ip_overall, ip_providers, ip_domains = sending_ip_files(settings)
@@ -1799,6 +1906,7 @@ def render(settings, template_path=None):
             "owner": dom.get("owner") or "",
             "tenant": dom.get("tenant") or "",
             "verified": (dom.get("status") == "verified"),
+            "tenant_from_admin": bool(dom.get("tenant_from_admin")),
         }
         if not settings["vault_enabled"]:
             entry["filename"] = f"{C_DKIM}/{dom['domain']}/{dom['selector']}.key"
@@ -1885,6 +1993,9 @@ def write_config(settings, template_path=None, stamp=True):
     # keep selecting a removed address. Rate limits are in other files.
     if settings["sending_ips"]:
         stamped["sources"] = files["sources.toml"]
+    # SMTP sessions can cache a relay decision for a recipient domain.
+    # Reopen the listeners when relay trust changes to clear that cache.
+    stamped["relay_hosts"] = files["relay_hosts.toml"]
     if clustered(settings):
         # KUMO_NODE_ID of the environment follows the cluster mode, and
         # kumod reads the store password in its init event only

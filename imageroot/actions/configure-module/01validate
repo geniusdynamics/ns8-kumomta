@@ -175,7 +175,7 @@ if settings["metrics_host"]:
         error("metrics_host", settings["metrics_host"], "domain_already_used_in_traefik")
     if not data.get("metrics_password") and not kumo.read_secret("metrics_password"):
         error("metrics_password", "", "password_required")
-    elif data.get("metrics_password") and len(data["metrics_password"]) < 12:
+    elif data.get("metrics_password") and len(data["metrics_password"]) < 16:
         error("metrics_password", "", "password_too_short")
     for net in settings["metrics_allowlist"]:
         try:

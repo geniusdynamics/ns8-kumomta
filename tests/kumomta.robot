@@ -110,7 +110,7 @@ API answers
 
 Inject
     [Arguments]    ${recipient}
-    ${body} =    Set Variable    {"envelope_sender":"noreply@${API_DOMAIN}","content":{"from":{"email":"noreply@${API_DOMAIN}","name":"CI"},"subject":"ns8-kumomta CI injection","text_body":"Injected by the CI","headers":{"X-Campaign":"ci-campaign"}},"recipients":[{"email":"${recipient}","metadata":{"ref":"ci-ref-1"}}]}
+    ${body} =    Set Variable    {"envelope_sender":"noreply@${API_DOMAIN}","content":{"from":{"email":"noreply@${API_DOMAIN}","name":"CI"},"subject":"ns8-kumomta CI injection","text_body":"Injected by the CI","headers":{"X-Tenant":"untrusted-tenant","X-Campaign":"ci-campaign"}},"recipients":[{"email":"${recipient}","metadata":{"ref":"ci-ref-1"}}]}
     ${code}  ${reply} =    API call    POST    /api/inject/v1    ${INT_USER}    ${INT_PASS}    ${body}
     Should Be Equal    ${code}    200    ${reply}
     ${result} =    Evaluate    json.loads($reply)    modules=json
@@ -151,7 +151,7 @@ Check if kumomta can be configured
 Check if a populated standalone instance survives the update
     Skip If    $SCENARIO != 'update'    Fresh installation
     ${before} =    Get configuration
-    ${hashes_before}  ${rc} =    State file    sha256sum secrets/smtp_users.toml dkim/${TEST_DOMAIN}/ci1.key
+    ${hashes_before}  ${rc} =    State file    sha256sum dkim/${TEST_DOMAIN}/ci1.key
     Should Be Equal As Integers    ${rc}  0    ${hashes_before}
     Submit    before-update@${DEFER_DOMAIN}
     Wait Until Keyword Succeeds    2 min    5 sec    Domain is queued    ${DEFER_DOMAIN}
@@ -164,15 +164,17 @@ Check if a populated standalone instance survives the update
     Should Be Equal    ${image}    ${IMAGE_URL}
     Wait Until Keyword Succeeds    2 min    5 sec    Domain is queued    ${DEFER_DOMAIN}
     ${after} =    Get configuration
-    FOR    ${field}    IN    hostname    smtp_users    domains    inbound_routes    shaping    retry_interval    max_age
+    FOR    ${field}    IN    hostname    smtp_users    domains    inbound_routes    shaping    retry_interval    max_age    cluster_relay
         Should Be Equal    ${after}[${field}]    ${before}[${field}]
     END
     Should Be Equal    ${after}[cluster_store]    none
     Should Be Equal    ${after}[cluster_status][mode]    standalone
     Should Not Be True    ${after}[tsa_enabled]
-    ${hashes_after}  ${rc} =    State file    sha256sum secrets/smtp_users.toml dkim/${TEST_DOMAIN}/ci1.key
+    ${hashes_after}  ${rc} =    State file    sha256sum dkim/${TEST_DOMAIN}/ci1.key
     Should Be Equal As Integers    ${rc}  0    ${hashes_after}
     Should Be Equal    ${hashes_after}    ${hashes_before}
+    ${output}  ${rc} =    State file    grep -q '"scrypt"' secrets/smtp_users.json
+    Should Be Equal As Integers    ${rc}    0
 
 Check if the configuration reads back without secrets
     ${output}  ${rc} =    Execute Command    api-cli run module/${module_id}/get-configuration --data '{}'
@@ -189,7 +191,6 @@ Check if the configuration reads back without secrets
     Should Be Equal    ${config}[shaping][0][domain]    gmail.com
     Should Not Be True    ${config}[vault_enabled]
     Should Not Be True    ${config}[vault_token_set]
-    Should Be True    ${config}[cluster_relay_active]
 
 Check if the secrets are private files
     ${output}  ${rc} =    State file    stat -c %a secrets secrets/smtp_users.toml secrets/api_password
@@ -231,7 +232,21 @@ Check if unauthenticated relaying is denied
     ...    return_rc=True
     Should Be Equal As Integers    ${rc}  0    ${output}
 
+Check if a fresh installation requires opt-in for the cluster relay
+    Skip If    $SCENARIO == 'update'    The upgrade preserves the saved relay setting
+    ${config} =    Get configuration
+    Should Not Be True    ${config}[cluster_relay]
+    Should Not Be True    ${config}[cluster_relay_active]
+    ${ids} =    Smarthost providers
+    Should Not Contain    ${ids}    ${module_id}
+
+Check if loopback requires authentication for external recipients
+    ${output}  ${rc} =    Execute Command    python3 ${CHECK} relay 127.0.0.1 25 someone@example.com someone@example.net
+    ...    return_rc=True
+    Should Be Equal As Integers    ${rc}  0    ${output}
+
 Check if kumomta is offered as cluster smarthost
+    ${result} =    Configure    {"cluster_relay":true}
     ${output}  ${rc} =    Execute Command    api-cli run cluster/get-smarthost --data '{}'
     ...    return_rc=True
     Should Be Equal As Integers    ${rc}  0
@@ -396,6 +411,33 @@ Check if a sending domain can be removed through the API
     ${listing} =    Run action    list-domains
     ${names} =    Evaluate    [d['domain'] for d in $listing['domains']]
     Should Not Contain    ${names}    ${API_DOMAIN}
+
+Check if scopes, tenant assignment and password rotation are enforced
+    ${result} =    Configure    {"require_verified_domains":false,"integrations":[{"name":"ci-inject-only","password":"${INT_PASS}","scopes":["inject"]},{"name":"ci-domains-only","password":"${INT_PASS}","scopes":["domains"]},{"name":"ci-smtp-only","password":"${INT_PASS}","scopes":["smtp"]}]}
+    ${body} =    Set Variable    {"envelope_sender":"a@${TEST_DOMAIN}","content":{"from":{"email":"a@${TEST_DOMAIN}"},"text_body":"Test message","headers":{"X-Tenant":"untrusted-tenant"}},"recipients":[{"email":"scope-test@example.net"}]}
+    ${code}  ${reply} =    API call    GET    /api/v1/domains    ci-inject-only    ${INT_PASS}
+    Should Be Equal    ${code}    403
+    FOR    ${user}    IN    ci-domains-only    ci-smtp-only
+        ${code}  ${reply} =    API call    POST    /api/inject/v1    ${user}    ${INT_PASS}    ${body}
+        Should Be Equal    ${code}    401
+    END
+    ${output}  ${rc} =    Execute Command    python3 ${CHECK} badauth 127.0.0.1 587 ci-inject-only '${INT_PASS}'
+    ...    return_rc=True
+    Should Be Equal As Integers    ${rc}    0    ${output}
+    Should Contain    ${output}    535
+    ${code}  ${reply} =    API call    POST    /api/inject/v1    ci-inject-only    ${INT_PASS}    ${body}
+    Should Be Equal    ${code}    200    ${reply}
+    ${data} =    Evaluate    json.loads($reply)    modules=json
+    Should Be Equal As Integers    ${data}[success_count]    1
+    ${event} =    Wait Until Keyword Succeeds    5 min    15 sec    Event is logged    Delivery    scope-test@example.net
+    Should Be Equal    ${event}[queue]    ns8-integration-ci-inject-only@example.net
+    ${rotated} =    Set Variable    ${INT_PASS}-rotated
+    ${result} =    Configure    {"integrations":[{"name":"ci-inject-only","password":"${rotated}","scopes":["inject"]}]}
+    ${code}  ${reply} =    API call    POST    /api/inject/v1    ci-inject-only    ${INT_PASS}    ${body}
+    Should Be Equal    ${code}    401
+    ${code}  ${reply} =    API call    POST    /api/inject/v1    ci-inject-only    ${rotated}    ${body}
+    Should Be Equal    ${code}    200    ${reply}
+    ${result} =    Configure    {"require_verified_domains":true,"integrations":[]}
 
 Check if sink mode can be turned off
     ${result} =    Configure    {"sink_enabled":false}

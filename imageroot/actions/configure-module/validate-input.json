@@ -77,7 +77,7 @@
         },
         "cluster_relay": {
             "type": "boolean",
-            "description": "Offer the MTA as smarthost to the cluster: relay from the cluster network and publish the submission service"
+            "description": "Offer the MTA as smarthost to the cluster. Enables unauthenticated relay from the VPN to the node VPN address on port 25. Off by default"
         },
         "smtp_users": {
             "type": "array",
@@ -341,7 +341,7 @@
                     "tenant": {
                         "type": "string",
                         "maxLength": 64,
-                        "description": "KumoMTA tenant forced on the messages of this credential; empty lets the X-Tenant header choose"
+                        "description": "Tenant assigned to the credential. If empty, use the administrator-assigned domain tenant or a tenant based on the credential name"
                     },
                     "scopes": {
                         "type": "array",
@@ -358,7 +358,7 @@
                     "max_message_rate": {
                         "type": "string",
                         "maxLength": 32,
-                        "description": "Sending rate of the tenant, e.g. 1000/h; empty for no limit"
+                        "description": "Sending rate of the fixed tenant or, when unbound, the credential. Example 1000/h. Empty means no limit"
                     }
                 },
                 "additionalProperties": false

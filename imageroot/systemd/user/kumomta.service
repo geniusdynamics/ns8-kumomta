@@ -16,8 +16,8 @@
 
 [Unit]
 Description=KumoMTA mail transfer agent
-Wants=network-online.target
-After=network-online.target
+Wants=network-online.target kumomta-api.service
+After=network-online.target kumomta-api.service
 
 [Service]
 Environment=PODMAN_SYSTEMD_UNIT=%n

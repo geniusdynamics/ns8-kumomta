@@ -6,7 +6,7 @@
 """In-process fake of the OpenBao HTTP API and of the ns8-openbao client
 provisioning actions, for unit tests (no network, no agent package).
 
-Adapted from tests/unit/test_client_provisioning.py of ns8-openbao: response
+Shared with ns8-kumomta (tests/fake_bao_api.py), plus the database\nengine mount ns8-db-<module id>. Adapted from\ntests/unit/test_client_provisioning.py of ns8-openbao: response
 wrapping (single use, creation_path), entity alias confinement of the
 templated policies (ns8-kv/*/modules/<alias>/*, groups/<alias>/*),
 renew-self, revoke-self and KV version 2.
@@ -26,6 +26,7 @@ class FakeBao:
         self.wraps = {}
         self.kv = {}          # (mount, path) -> data
         self.requests = []
+        self.database = {}    # mount -> [(method, kind, name, body)]
         self.approved = {}    # module_id -> {"database_engine": bool, "groups": [...]}
         self.pending = {}
         self.enabled = True
@@ -111,6 +112,14 @@ class FakeBao:
             return 204, None
         mount, _, rest = path.partition("/")
         kind, _, key = rest.partition("/")
+        if mount.startswith("ns8-db-") and kind in ("config", "rotate-root", "roles"):
+            info = self.tokens.get(token) or {}
+            grant = self.approved.get(info.get("alias")) or {}
+            if info.get("kind") != "root" and not (info.get("kind") == "module" and mount == f"ns8-db-{info['alias']}"
+                                                   and grant.get("database_engine")):
+                return 403, {"errors": ["permission denied"]}
+            self.database.setdefault(mount, []).append((method, kind, key, body))
+            return 204, None
         if kind in ("data", "metadata"):
             if not self._allowed(token, mount, key):
                 return 403, {"errors": ["permission denied"]}

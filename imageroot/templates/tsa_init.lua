@@ -8,8 +8,8 @@
   the automation rules of the shaping files and serves the resulting
   overrides (get_config_v1) and suspensions (subscribe_event_v1). kumod
   sends no credentials: access is granted by source address only
-  (trusted_hosts: the loopback, plus the cluster network of a clustered
-  instance, which is the trusted firewall zone of NS8).
+  (trusted_hosts: the loopback, plus, on a clustered instance, the VPN
+  addresses of the peers that use the same throttle store).
 ]]
 
 local tsa = require 'tsa'

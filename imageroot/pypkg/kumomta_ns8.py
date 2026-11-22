@@ -89,6 +89,9 @@ DEFAULTS = {
     "max_message_size": 25,           # MiB
     "relay_networks": [],
     "cluster_relay": True,
+    # Relay without SMTP AUTH from the loopback (127.0.0.0/8, ::1) of the
+    # node: other services of the host can send through the MTA
+    "trust_loopback": True,
     "smtp_users": [],                 # names only, hashes in secrets
     "domains": [],                    # [{domain, selector}]
     "inbound_routes": [],             # [{domain, host, port}]
@@ -110,11 +113,14 @@ DEFAULTS = {
     "vault_key": "",
     "metrics_host": "",
     "metrics_allowlist": [],
+    # Metrics route reachable from the internet; off limits it to private
+    # networks, the cluster network and metrics_allowlist
+    "metrics_public": True,
     # Testing: accept and discard every outbound message (no delivery)
     "sink_enabled": False,
     # Sending platforms: integration credentials (hashes in secrets),
     # HTTPS API host name, sending domain policy
-    "integrations": [],               # [{name, tenant, scopes, max_message_rate}]
+    "integrations": [],               # [{name, tenant, tenant_prefix, scopes, max_message_rate, max_domains}]
     "api_host": "",
     "api_allowlist": [],
     "require_verified_domains": True,
@@ -173,6 +179,18 @@ MODULE_ID_RE = re.compile(r"^[a-z][a-z0-9-]*[0-9]+$")
 # A store URL never carries credentials: the password is a 0600 file
 REDIS_URL_RE = re.compile(r"^rediss?://(\[[0-9a-fA-F:.]+\]|[A-Za-z0-9.-]+)(:[0-9]{1,5})?(/[0-9]{0,2})?$")
 TENANT_RE = re.compile(r"^[A-Za-z0-9._-]{0,64}$")
+
+
+def integration_tenant_allowed(integ, tenant):
+    """True if a multi-tenant credential (no fixed tenant) may use this
+    tenant label: valid syntax, and within its tenant_prefix if any. A
+    credential with a fixed tenant may use only that one."""
+    if not tenant or not TENANT_RE.match(tenant):
+        return False
+    fixed = integ.get("tenant") or ""
+    if fixed:
+        return tenant == fixed
+    return tenant.startswith(integ.get("tenant_prefix") or "")
 
 
 def log(message):
@@ -315,6 +333,7 @@ def write_integrations(settings, hashes):
             "salt": cred["salt"],
             "sha256": cred["sha256"],
             "tenant": integ.get("tenant") or "",
+            "tenant_prefix": integ.get("tenant_prefix") or "",
             "scopes": list(integ.get("scopes") or []),
             "max_message_rate": integ.get("max_message_rate") or "",
         }
@@ -452,6 +471,20 @@ def is_ip_address(value):
         return True
     except ValueError:
         return False
+
+
+# Private and local networks: the metrics route without public access
+PRIVATE_NETWORKS = ["127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
+                    "100.64.0.0/10", "::1/128", "fc00::/7"]
+
+
+def metrics_allowlist(settings):
+    """ip_allowlist of the metrics route, empty for no restriction"""
+    allow = list(settings["metrics_allowlist"])
+    if not settings["metrics_public"]:
+        cnet, _ = cluster_info()
+        allow = PRIVATE_NETWORKS + ([normalize_network(cnet)] if cnet else []) + allow
+    return list(dict.fromkeys(allow))
 
 
 def cluster_info():
@@ -1548,6 +1581,11 @@ def cluster_check(prestart=False, immediate=False):
         publish_cluster_record(settings, state)
     except Exception as ex:
         log(agent.SD_WARNING + f"Cannot publish the cluster record: {ex}")
+    # tsa-daemon reads its trusted peers at startup only
+    if state.get("tsa_listen") and tsa_restart_required() \
+            and systemctl("-q", "is-active", "kumomta-tsa.service") == 0:
+        if systemctl("restart", "kumomta-tsa.service") == 0:
+            stamp_tsa()
     if systemctl("-q", "is-active", "kumomta.service") == 0:
         if restart:
             systemctl("restart", "kumomta.service")
@@ -1689,22 +1727,48 @@ def init_settings(settings):
     return init
 
 
+def store_peer_addresses(identity):
+    """VPN addresses of the kumomta peers that use the throttle store
+    identity, this instance included. A record counts only when its module
+    is a kumomta instance and its host is the VPN address of the node that
+    runs it, so another module cannot add an address. Raises on errors."""
+    rdb = agent.redis_connect(use_replica=True)
+    modules = kumomta_modules()
+    addresses = set()
+    for module_id, rec in service_records(CLUSTER_SERVICE).items():
+        node = modules.get(module_id)
+        if not node or rec.get("store") != identity:
+            continue
+        address = rdb.hget(f"node/{node}/vpn", "ip_address") or ""
+        if address and address == rec.get("host") and is_ip_address(address):
+            addresses.add(address)
+    return sorted(addresses)
+
+
 def render_tsa_init(settings, template_dir):
-    """Policy of tsa-daemon, or None when this instance runs none. A
-    clustered daemon listens on the cluster VPN address and trusts the
-    cluster network, so peers joining or leaving need no restart of it:
-    kumod sends no credentials to tsa-daemon, the trust is the source
-    address, and NS8 accepts the cluster network in the trusted zone."""
+    """Policy of tsa-daemon, or None when this instance runs none. kumod
+    sends no credentials to tsa-daemon: the trust is the source address.
+    A clustered daemon trusts the loopback, this node and the VPN
+    addresses of the peers using the same throttle store, not the whole
+    cluster network. tsa-daemon reads the list at startup only: the
+    cluster check restarts it when a peer joins or leaves. If the peers
+    cannot be read, it falls back to the cluster network, so the shaping
+    feed keeps working."""
     state = read_cluster_state()
     if not state.get("tsa_listen"):
         return None
     trusted = ["127.0.0.1", "::1"]
     if clustered(settings):
         cnet, address = cluster_info()
-        if cnet:
-            trusted.append(normalize_network(cnet))
-        elif address:
+        if address:
             trusted.append(address)
+        try:
+            trusted += store_peer_addresses(store_identity(settings))
+        except Exception as ex:
+            log(agent.SD_WARNING + f"Cannot read the cluster peers, tsa-daemon trusts the cluster network: {ex}")
+            if cnet:
+                trusted.append(normalize_network(cnet))
+    trusted = list(dict.fromkeys(trusted))
     with open(os.path.join(template_dir, "tsa_init.lua")) as fp:
         template = fp.read()
     generated = f"local TSA = {lua_value({'listen': state['tsa_listen'], 'trusted_hosts': trusted})}\n"
@@ -1764,7 +1828,8 @@ def render(settings, template_path=None):
     files["listener_domains.toml"] = toml_dumps(listener_domains, header=head + "\nDomains accepted from anyone and relayed to their inbound route.")
 
     # Trusted networks: relaying without authentication
-    networks = ["127.0.0.0/8", "::1/128"] + list(settings["relay_networks"])
+    networks = ["127.0.0.0/8", "::1/128"] if settings["trust_loopback"] else []
+    networks += list(settings["relay_networks"])
     if offers_cluster_relay(settings):
         cnet, _ = cluster_info()
         if cnet:

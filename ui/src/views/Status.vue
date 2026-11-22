@@ -96,6 +96,37 @@
         />
       </cv-column>
       <cv-column :md="4" :max="4">
+        <NsInfoCard
+          light
+          :title="metricsUrl || $t('status.metrics_not_published')"
+          :description="metricsDescription"
+          :icon="ChartLine32"
+          :loading="loading.getConfiguration"
+          class="min-height-card"
+        >
+          <template slot="content">
+            <NsButton
+              v-if="metricsUrl"
+              kind="ghost"
+              :icon="Launch20"
+              :disabled="loading.getConfiguration"
+              @click="openMetrics"
+            >
+              {{ $t("status.open_metrics") }}
+            </NsButton>
+            <NsButton
+              v-else
+              kind="ghost"
+              :icon="ArrowRight20"
+              :disabled="loading.getConfiguration"
+              @click="goToAppPage(instanceName, 'settings')"
+            >
+              {{ $t("status.configure_metrics") }}
+            </NsButton>
+          </template>
+        </NsInfoCard>
+      </cv-column>
+      <cv-column :md="4" :max="4">
         <NsBackupCard
           :title="core.$t('backup.title')"
           :noBackupMessage="core.$t('backup.no_backup_configured')"
@@ -287,6 +318,8 @@
 
 <script>
 import to from "await-to-js";
+import ChartLine32 from "@carbon/icons-vue/es/chart--line/32";
+import Launch20 from "@carbon/icons-vue/es/launch/20";
 import { mapState } from "vuex";
 import {
   QueryParamService,
@@ -318,6 +351,11 @@ export default {
       redirectTimeout: 0,
       host: "",
       ports: [],
+      metricsHost: "",
+      metricsPublic: true,
+      metricsAllowlist: [],
+      ChartLine32,
+      Launch20,
       status: {
         instance: "",
         services: [],
@@ -341,6 +379,20 @@ export default {
   },
   computed: {
     ...mapState(["instanceName", "instanceLabel", "core", "appName"]),
+    metricsUrl() {
+      return this.metricsHost ? `https://${this.metricsHost}/metrics` : "";
+    },
+    metricsDescription() {
+      if (!this.metricsHost) {
+        return this.$t("status.metrics");
+      }
+      if (this.metricsPublic) {
+        return this.metricsAllowlist.length
+          ? this.$t("status.metrics_allowlist_only")
+          : this.$t("status.metrics_public");
+      }
+      return this.$t("status.metrics_private");
+    },
     listenersDescription() {
       if (!this.ports.length) {
         return this.$t("status.mta");
@@ -391,6 +443,9 @@ export default {
     this.listBackupRepositories();
   },
   methods: {
+    openMetrics() {
+      window.open(this.metricsUrl, "_blank", "noopener");
+    },
     async getConfiguration() {
       this.loading.getConfiguration = true;
       this.error.getConfiguration = "";
@@ -436,6 +491,9 @@ export default {
     getConfigurationCompleted(taskContext, taskResult) {
       const config = taskResult.output;
       this.host = config.hostname;
+      this.metricsHost = config.metrics_host || "";
+      this.metricsPublic = config.metrics_public !== false;
+      this.metricsAllowlist = config.metrics_allowlist || [];
       const ports = [];
       if (config.inbound_enabled) {
         ports.push(config.inbound_port);

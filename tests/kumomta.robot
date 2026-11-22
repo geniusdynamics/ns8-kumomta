@@ -26,6 +26,8 @@ ${HOOK_FILE}       /root/kumomta_webhook.jsonl
 ${HOOK_PORT}       18300
 ${HOOK_TOKEN}      ci-webhook-bearer-token
 ${HOOK_SECRET}     ci-webhook-signing-secret-2026
+${METRICS_HOST}    mta-metrics.ns8-ci.test
+${METRICS_PASS}    CiMetricsPass2026
 
 *** Keywords ***
 Run action
@@ -116,11 +118,35 @@ Inject
     ${result} =    Evaluate    json.loads($reply)    modules=json
     RETURN    ${result}
 
+Inject with tenant
+    [Arguments]    ${recipient}    ${tenant}    ${domain}=${API_DOMAIN}
+    ${body} =    Set Variable    {"envelope_sender":"noreply@${domain}","content":{"from":{"email":"noreply@${domain}","name":"CI"},"subject":"ns8-kumomta CI tenant","text_body":"Injected by the CI","headers":{"X-Tenant":"${tenant}","X-Campaign":"ci-campaign"}},"recipients":[{"email":"${recipient}"}]}
+    ${code}  ${reply} =    API call    POST    /api/inject/v1    ${INT_USER}    ${INT_PASS}    ${body}
+    Should Be Equal    ${code}    200    ${reply}
+    ${result} =    Evaluate    json.loads($reply)    modules=json
+    RETURN    ${result}
+
+Loopback relay is refused
+    ${output}  ${rc} =    Execute Command    python3 ${CHECK} rcpt 127.0.0.1 25 someone@example.com loopback@example.net
+    ...    return_rc=True
+    Should Not Start With    ${output}    250
+    RETURN    ${output}
+
 Webhook record is valid
     [Arguments]    ${recipient}
     ${output}  ${rc} =    Execute Command    python3 ${FAKE_HOOK} check ${HOOK_FILE} ${recipient} ${HOOK_SECRET} ${HOOK_TOKEN}
     ...    return_rc=True
     Should Be Equal As Integers    ${rc}  0    ${output}
+    RETURN    ${output}
+
+Metrics answer
+    [Arguments]    ${credentials}    ${expected}
+    ${auth} =    Set Variable If    '${credentials}' != ''    -u '${credentials}'    ${EMPTY}
+    ${output}  ${rc} =    Execute Command    curl -sk -D - -o /dev/null --max-time 30 --resolve ${METRICS_HOST}:443:127.0.0.1 ${auth} https://${METRICS_HOST}/metrics
+    ...    return_rc=True
+    Should Be Equal As Integers    ${rc}  0    ${output}
+    ${output} =    Evaluate    $output.lower()
+    Should Match Regexp    ${output}    ^http/\\S+ ${expected}
     RETURN    ${output}
 
 State file
@@ -211,6 +237,17 @@ Check if the admin API needs authentication
     ${output} =    Execute Command    curl -s -o /dev/null -w '\%{http_code}' http://127.0.0.1:${config}[api_port]/metrics.json
     Should Be Equal    ${output}    401
 
+Check if the metrics route asks for the metrics user
+    ${result} =    Configure    {"metrics_host":"${METRICS_HOST}","metrics_password":"${METRICS_PASS}","metrics_public":false}
+    ${config} =    Get configuration
+    Should Not Be True    ${config}[metrics_public]
+    ${output} =    Wait Until Keyword Succeeds    1 min    5 sec    Metrics answer    ${EMPTY}    401
+    Should Contain    ${output}    www-authenticate: basic realm=
+    Wait Until Keyword Succeeds    1 min    5 sec    Metrics answer    metrics:${METRICS_PASS}    200
+    ${result} =    Configure    {"metrics_public":true}
+    Wait Until Keyword Succeeds    1 min    5 sec    Metrics answer    metrics:${METRICS_PASS}    200
+    [Teardown]    Configure    {"metrics_host":""}
+
 Check if an authenticated submission is accepted and queued
     ${output}  ${rc} =    Execute Command    python3 ${CHECK} submit 127.0.0.1 587 ${SMTP_USER} '${SMTP_PASS}' ci@${TEST_DOMAIN} user@${DEFER_DOMAIN}
     ...    return_rc=True
@@ -272,6 +309,20 @@ Check if the cluster relay can be turned back on
     ${ids} =    Smarthost providers
     Should Contain    ${ids}    ${module_id}
     ${output} =    Submission key exists
+    Should Be Equal    ${output}    1
+
+Check if the loopback trust can be turned off and on
+    ${output}  ${rc} =    Execute Command    python3 ${CHECK} rcpt 127.0.0.1 25 someone@example.com loopback@example.net
+    ...    return_rc=True
+    Should Start With    ${output}    250
+    ${result} =    Configure    {"trust_loopback":false}
+    ${config} =    Get configuration
+    Should Not Be True    ${config}[trust_loopback]
+    ${output}  ${rc} =    State file    grep -c -F '127.0.0.0/8' kumomta/relay_hosts.toml
+    Should Be Equal    ${output}    0
+    ${output} =    Wait Until Keyword Succeeds    1 min    5 sec    Loopback relay is refused
+    ${result} =    Configure    {"trust_loopback":true}
+    ${output}  ${rc} =    State file    grep -c -F '127.0.0.0/8' kumomta/relay_hosts.toml
     Should Be Equal    ${output}    1
 
 Check if sink mode records the messages as delivered
@@ -396,6 +447,33 @@ Check if a sending domain can be removed through the API
     ${listing} =    Run action    list-domains
     ${names} =    Evaluate    [d['domain'] for d in $listing['domains']]
     Should Not Contain    ${names}    ${API_DOMAIN}
+
+Check if a multi-tenant credential takes the tenant from X-Tenant
+    ${result} =    Configure    {"integrations":[{"name":"${INT_USER}","tenant":"","tenant_prefix":"ci-","scopes":["inject","domains"],"max_message_rate":"1000/min","max_domains":1}],"require_verified_domains":false}
+    ${who} =    Wait Until Keyword Succeeds    1 min    5 sec    API answers
+    Should Be Equal    ${who}[tenant]    ${EMPTY}
+    Should Be Equal    ${who}[tenant_prefix]    ci-
+    ${code}  ${reply} =    API call    POST    /api/v1/domains    ${INT_USER}    ${INT_PASS}    {"domain":"${API_DOMAIN}","selector":"ci3","tenant":"other-cust"}
+    Should Be Equal    ${code}    422    ${reply}
+    ${code}  ${reply} =    API call    POST    /api/v1/domains    ${INT_USER}    ${INT_PASS}    {"domain":"${API_DOMAIN}","selector":"ci3","tenant":"ci-cust1"}
+    Should Be Equal    ${code}    201    ${reply}
+    ${dom} =    Evaluate    json.loads($reply)    modules=json
+    Should Be Equal    ${dom}[tenant]    ci-cust1
+    ${code}  ${reply} =    API call    POST    /api/v1/domains    ${INT_USER}    ${INT_PASS}    {"domain":"second.${API_DOMAIN}","selector":"ci3"}
+    Should Be Equal    ${code}    403    ${reply}
+    Should Contain    ${reply}    domain_quota
+    ${config} =    Get configuration
+    Should Be Equal As Integers    ${config}[integrations][0][domains_count]    1
+    ${result} =    Inject with tenant    tenant-ok@example.net    ci-cust2
+    Should Be Equal As Integers    ${result}[success_count]    1    ${result}
+    ${event} =    Wait Until Keyword Succeeds    5 min    15 sec    Event is logged    Delivery    tenant-ok@example.net
+    Should Be Equal    ${event}[queue]    ci-campaign:ci-cust2@example.net
+    ${result} =    Inject with tenant    tenant-denied@example.net    other-cust
+    Should Be Equal As Integers    ${result}[fail_count]    1    ${result}
+    ${errors} =    Evaluate    ' '.join($result['errors'])
+    Should Contain    ${errors}    not allowed
+    [Teardown]    Run Keywords    API call    DELETE    /api/v1/domains/${API_DOMAIN}    ${INT_USER}    ${INT_PASS}
+    ...    AND    Configure    {"integrations":[{"name":"${INT_USER}","tenant":"ci-tenant","scopes":["inject","domains"],"max_message_rate":"1000/min"}],"require_verified_domains":true}
 
 Check if sink mode can be turned off
     ${result} =    Configure    {"sink_enabled":false}

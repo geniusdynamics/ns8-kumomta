@@ -79,6 +79,10 @@
             "type": "boolean",
             "description": "Offer the MTA as smarthost to the cluster: relay from the cluster network and publish the submission service"
         },
+        "trust_loopback": {
+            "type": "boolean",
+            "description": "Relay without SMTP AUTH from the loopback of the node (127.0.0.0/8, ::1): other services of the host can send through the MTA"
+        },
         "smtp_users": {
             "type": "array",
             "items": {
@@ -306,6 +310,10 @@
                 "maxLength": 64
             }
         },
+        "metrics_public": {
+            "type": "boolean",
+            "description": "Metrics route reachable from the internet; false limits it to private networks, the cluster network and metrics_allowlist"
+        },
         "sink_enabled": {
             "type": "boolean",
             "description": "Testing only: accept and discard every outbound message instead of delivering it (Delivery records are still logged)"
@@ -341,7 +349,13 @@
                     "tenant": {
                         "type": "string",
                         "maxLength": 64,
-                        "description": "KumoMTA tenant forced on the messages of this credential; empty lets the X-Tenant header choose"
+                        "description": "KumoMTA tenant forced on the messages of this credential; empty makes a multi-tenant credential: the X-Tenant header (or the tenant of the sending domain) chooses"
+                    },
+                    "tenant_prefix": {
+                        "type": "string",
+                        "maxLength": 32,
+                        "pattern": "^[A-Za-z0-9._-]*$",
+                        "description": "Multi-tenant credential: the tenant labels it may use (X-Tenant header, tenant of its domains) must start with this prefix; empty allows any label"
                     },
                     "scopes": {
                         "type": "array",
@@ -358,7 +372,13 @@
                     "max_message_rate": {
                         "type": "string",
                         "maxLength": 32,
-                        "description": "Sending rate of the tenant, e.g. 1000/h; empty for no limit"
+                        "description": "Sending rate, e.g. 1000/h; empty for no limit. Fixed tenant: the rate of that tenant. Multi-tenant credential: the rate of each of its tenants"
+                    },
+                    "max_domains": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 1000000,
+                        "description": "Sending domains the credential may add through the domain API; 0 for no limit"
                     }
                 },
                 "additionalProperties": false

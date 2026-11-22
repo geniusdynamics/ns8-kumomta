@@ -224,6 +224,15 @@ elif not os.path.exists(os.path.join(kumo.SECRETS_DIR, "smtp_users.toml")):
 # Integration credentials of the sending platforms: salted SHA-256, the
 # list replaces the current one. Always local: kumod checks them itself.
 hashes = kumo.read_integrations_secrets()
+
+
+def inject_credentials(integrations, creds):
+    """{name: hash} of the credentials kumod accepts on /api/inject"""
+    return {i["name"]: creds.get(i["name"]) for i in integrations
+            if "inject" in (i.get("scopes") or []) and creds.get(i["name"])}
+
+
+old_inject = inject_credentials(current["integrations"], hashes)
 if "integrations" in data:
     new_hashes, integrations = {}, []
     for integ in data["integrations"]:
@@ -236,13 +245,23 @@ if "integrations" in data:
         integrations.append({
             "name": name,
             "tenant": integ.get("tenant") or "",
+            # Multi-tenant credentials: the X-Tenant labels (and domain
+            # tenants) must start with this prefix; empty allows any label
+            "tenant_prefix": "" if integ.get("tenant") else (integ.get("tenant_prefix") or ""),
             "scopes": [sc for sc in kumo.INTEGRATION_SCOPES if sc in (integ.get("scopes") or [])],
             "max_message_rate": integ.get("max_message_rate") or "",
+            # Domains the credential may add through the API, 0 = no limit
+            "max_domains": int(integ.get("max_domains") or 0),
         })
     hashes = new_hashes
     settings["integrations"] = sorted(integrations, key=lambda i: i["name"])
 if kumo.write_integrations(settings, hashes):
     open(".reload-required", "w").close()
+if inject_credentials(settings["integrations"], hashes) != old_inject:
+    # kumod caches an accepted HTTP basic authentication for 60 seconds,
+    # whatever the configuration epoch: restart it so that a changed or
+    # revoked injection credential stops working at once
+    open(".restart-required", "w").close()
 
 # DKIM keys of the sending domains. Local mode: generate the missing keys.
 # OpenBao mode: keys are written to OpenBao by generate-dkim-key, so that

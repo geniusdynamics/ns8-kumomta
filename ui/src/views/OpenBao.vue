@@ -36,23 +36,65 @@
               <template slot="text-right">{{ $t("common.enabled") }}</template>
             </NsToggle>
             <template v-if="vault_enabled">
-              <div v-if="servers.length" class="mg-bottom maxwidth">
-                <div class="label">{{ $t("openbao.discovered") }}</div>
-                <div class="servers">
-                  <NsButton
-                    v-for="server in servers"
-                    :key="server.module_id + server.url"
-                    kind="tertiary"
-                    size="small"
-                    :disabled="busy"
-                    @click="vault_address = server.url"
-                    >{{ server.ui_name || server.module_id }} ({{
-                      server.url
-                    }})</NsButton
-                  >
-                </div>
-              </div>
+              <cv-radio-group
+                vertical
+                :legend-text="$t('openbao.source')"
+                class="mg-bottom"
+              >
+                <cv-radio-button
+                  v-model="source"
+                  value="cluster"
+                  :label="$t('openbao.source_cluster')"
+                  :disabled="busy || !servers.length"
+                />
+                <cv-radio-button
+                  v-model="source"
+                  value="manual"
+                  :label="$t('openbao.source_manual')"
+                  :disabled="busy"
+                />
+              </cv-radio-group>
+              <NsInlineNotification
+                v-for="item in unpublished"
+                :key="item.module_id"
+                kind="info"
+                :title="
+                  $t('openbao.unpublished_title', {
+                    name: item.ui_name || item.module_id,
+                  })
+                "
+                :description="$t('openbao.unpublished_description')"
+                :showCloseButton="false"
+                class="maxwidth"
+              />
+              <NsInlineNotification
+                v-if="
+                  !loading.servers && !servers.length && !unpublished.length
+                "
+                kind="info"
+                :title="$t('openbao.no_cluster_instance')"
+                :description="$t('openbao.no_cluster_instance_description')"
+                :showCloseButton="false"
+                class="maxwidth"
+              />
+              <cv-select
+                v-if="source === 'cluster' && servers.length"
+                :label="$t('openbao.discovered')"
+                v-model="vault_address"
+                :disabled="busy"
+                class="mg-bottom maxwidth"
+              >
+                <cv-select-option
+                  v-for="server in servers"
+                  :key="server.module_id + server.url"
+                  :value="server.url"
+                  >{{ server.ui_name || server.module_id }} ({{
+                    server.url
+                  }})</cv-select-option
+                >
+              </cv-select>
               <NsTextInput
+                v-if="source === 'manual'"
                 :label="$t('openbao.address')"
                 v-model.trim="vault_address"
                 placeholder="https://vault.example.org"
@@ -233,7 +275,11 @@ export default {
       vault_path: "kumomta",
       vault_key: "",
       servers: [],
+      unpublished: [],
+      // "cluster": an OpenBao of the cluster, "manual": any URL
+      source: "manual",
       loading: {
+        servers: true,
         getConfiguration: false,
         configureModule: false,
         copy: false,
@@ -254,6 +300,18 @@ export default {
     ...mapState(["instanceName", "core", "appName"]),
     busy() {
       return this.loading.getConfiguration || this.loading.configureModule;
+    },
+  },
+  watch: {
+    source(value) {
+      const urls = this.servers.map((s) => s.url);
+      if (
+        value === "cluster" &&
+        urls.length &&
+        !urls.includes(this.vault_address)
+      ) {
+        this.vault_address = urls[0];
+      }
     },
   },
   created() {
@@ -279,6 +337,9 @@ export default {
         this.vault_enabled = c.vault_enabled;
         this.vault_enabled_saved = c.vault_enabled;
         this.vault_address = c.vault_address;
+        if (!this.loading.servers) {
+          this.chooseSource();
+        }
         this.vault_token_set = c.vault_token_set;
         this.vault_mount = c.vault_mount;
         this.vault_path = c.vault_path;
@@ -289,15 +350,29 @@ export default {
       this.loading.getConfiguration = false;
     },
     async listServers() {
+      this.loading.servers = true;
       try {
         const out = await this.runModuleTask("list-openbao-servers");
-        this.servers = out.servers;
-        if (!this.vault_address && this.servers.length) {
-          // Offer the first discovered instance as default
-          this.vault_address = this.servers[0].url;
-        }
+        this.servers = out.servers || [];
+        this.unpublished = out.unpublished || [];
       } catch (failure) {
         this.servers = [];
+        this.unpublished = [];
+      }
+      this.loading.servers = false;
+      this.chooseSource();
+    },
+    chooseSource() {
+      // An address of a cluster instance, or no address yet with
+      // instances to offer: the cluster choice
+      const urls = this.servers.map((s) => s.url);
+      if (urls.includes(this.vault_address)) {
+        this.source = "cluster";
+      } else if (!this.vault_address && urls.length) {
+        this.source = "cluster";
+        this.vault_address = urls[0];
+      } else {
+        this.source = "manual";
       }
     },
     async save() {

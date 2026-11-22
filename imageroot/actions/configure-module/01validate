@@ -212,6 +212,8 @@ for integ in data.get("integrations", []):
         error("integrations", name, "scope_required")
     if not kumo.TENANT_RE.match(integ.get("tenant") or ""):
         error("integrations", integ.get("tenant"), "invalid_tenant")
+    if not kumo.TENANT_RE.match(integ.get("tenant_prefix") or ""):
+        error("integrations", integ.get("tenant_prefix"), "invalid_tenant_prefix")
     if integ.get("max_message_rate") and not kumo.RATE_RE.match(integ["max_message_rate"]):
         error("integrations", integ["max_message_rate"], "invalid_rate")
 

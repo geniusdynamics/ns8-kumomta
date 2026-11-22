@@ -61,6 +61,10 @@
             "type": "boolean",
             "description": "Offer the MTA as smarthost to the cluster: relay from the cluster network and publish the submission service"
         },
+        "trust_loopback": {
+            "type": "boolean",
+            "description": "Relay without SMTP AUTH from the loopback of the node"
+        },
         "smtp_users": {
             "type": "array",
             "items": {
@@ -343,6 +347,10 @@
                 "maxLength": 64
             }
         },
+        "metrics_public": {
+            "type": "boolean",
+            "description": "Metrics route reachable from the internet"
+        },
         "smarthost_password_set": {
             "type": "boolean"
         },
@@ -413,6 +421,9 @@
                     "tenant": {
                         "type": "string"
                     },
+                    "tenant_prefix": {
+                        "type": "string"
+                    },
                     "scopes": {
                         "type": "array",
                         "items": {
@@ -421,6 +432,12 @@
                     },
                     "max_message_rate": {
                         "type": "string"
+                    },
+                    "max_domains": {
+                        "type": "integer"
+                    },
+                    "domains_count": {
+                        "type": "integer"
                     },
                     "password_set": {
                         "type": "boolean"
@@ -557,7 +574,10 @@
             "items": {
                 "type": "object",
                 "properties": {
-                    "secret_access": {"type": "boolean", "description": "This instance has approved the peer to read its cluster secrets"}
+                    "secret_access": {
+                        "type": "boolean",
+                        "description": "This instance has approved the peer to read its cluster secrets"
+                    }
                 },
                 "required": [
                     "module_id"

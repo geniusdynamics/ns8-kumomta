@@ -186,8 +186,11 @@ Messages of an integration must come `From:` a sending domain of the MTA,
 owned by it or by the administrator, and verified (DKIM and SPF found in
 the DNS) while `require_verified_domains` is on. `X-Tenant` and
 `X-Campaign` set the KumoMTA tenant and campaign (per-customer queues), a
-tenant bound to the credential wins, and `max_message_rate` throttles the
-tenant. The log records and the webhook carry `meta.tenant`,
+tenant bound to the credential wins, a multi-tenant credential may name
+only tenants within its `tenant_prefix`, and `max_message_rate` throttles
+the tenant (each tenant of a multi-tenant credential). `max_domains` caps
+the domains a credential adds through the API (0, the default, for no
+limit). The log records and the webhook carry `meta.tenant`,
 `meta.campaign` and the per-recipient injection `metadata` (`meta.extra`),
 with the IANA `bounce_classification`. With `bounce_domain`, the inbound
 listener accepts mail for it and for `bounces.<sending domain>` and logs
@@ -259,9 +262,12 @@ an `openbao_items_unavailable` warning with the same list. See
 [docs/openbao.md](docs/openbao.md).
 
 [geniusdynamics/ns8-openbao](https://github.com/geniusdynamics/ns8-openbao)
-publishes `module/<id>/srv/http/openbao` when its cluster network API is
-enabled: the UI lists those instances and offers the first one as default,
-and the manual URL remains the fallback.
+publishes `module/<id>/srv/http/openbao` when its "Cluster network API"
+is enabled. The OpenBao page offers two choices: "OpenBao of this
+cluster" (a list of those instances, the first one by default) and
+"Other OpenBao or Vault" (any URL). An openbao instance of the cluster
+without that API is named on the page with the setting to turn on, since
+it cannot be reached from the other nodes until then.
 
 ### Cluster smarthost
 
@@ -281,6 +287,16 @@ off: the cluster network leaves `relay_hosts.toml` and the
 lists the module and unauthenticated mail from the cluster addresses can
 only reach the inbound domains.
 
+### Loopback trust
+
+Clients connecting from the loopback of the node (`127.0.0.0/8`, `::1`)
+relay without SMTP AUTH by default, like the trusted networks: other
+services of the host can send through the MTA. The "Trust the loopback"
+toggle of the Settings page (`"trust_loopback": false`) removes the
+loopback from `relay_hosts.toml`; those clients then need a submission
+user or an integration credential to relay, and can still deliver to the
+inbound domains. The module's own HTTP API user is not affected.
+
 ### Sink mode (testing)
 
 `"sink_enabled": true` (Settings, "Sink mode (testing)", off by default)
@@ -293,6 +309,23 @@ every scheduled queue gets a `custom_lua` delivery protocol that logs a
 a warning banner on every page and `get-configuration` returns a
 `sink_mode_enabled` warning. See [docs/sink-mode.md](docs/sink-mode.md).
 
+### Prometheus metrics
+
+With `metrics_host` (Settings, "Prometheus metrics"), `configure-module`
+publishes `https://<metrics_host>/metrics` (and `/metrics.json`) through
+Traefik. kumod requires the HTTP basic credentials of the `metrics` user
+(`metrics_password`, at least 12 characters). kumod answers 401 without a
+`WWW-Authenticate` challenge, so the route adds one: a browser asks for
+the user and password instead of showing `<Unauthenticated> ... not
+permitted GET`. The Status page links to the URL.
+
+`metrics_public` (on by default, "Allow access from the internet") keeps
+the route reachable from anywhere. Off, the route is limited to private
+networks (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`,
+`100.64.0.0/10`, `fc00::/7`, loopback), the cluster network and
+`metrics_allowlist`. With it on, a non-empty `metrics_allowlist` limits
+the route to those networks. The password is required in every case.
+
 ### Live views
 
 `get-queue-status` reads `/metrics.json` of the local API.
@@ -304,8 +337,10 @@ kept 7 days (`kumomta-logs-cleanup.timer`).
 
 `state-include.conf` covers `settings.json`, `secrets/`, `openbao.env`,
 `dkim/` (the integration credentials are under `secrets/`), the rendered
-policy and the `kumomta-spool` volume. Before the
-backup `module-dump-state` asks kumod to flush its RocksDB spool. Restore
+policy and the `kumomta-spool` volume. The spool uses the KumoMTA
+`LocalDisk` backend (one file per message, no database to flush), so it
+is copied as is; a message written during the backup may be missing from
+it. Stop kumod first when an exact copy of the queue is needed. Restore
 and clone call `configure-module` with every setting and `lets_encrypt`
 off.
 

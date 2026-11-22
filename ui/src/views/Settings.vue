@@ -186,6 +186,19 @@
               "
               :showCloseButton="false"
             />
+            <NsToggle
+              value="trustLoopback"
+              :label="$t('settings.trust_loopback')"
+              v-model="trust_loopback"
+              :disabled="busy"
+              class="mg-bottom"
+            >
+              <template #tooltip>
+                {{ $t("settings.trust_loopback_tooltip") }}
+              </template>
+              <template slot="text-left">{{ $t("common.disabled") }}</template>
+              <template slot="text-right">{{ $t("common.enabled") }}</template>
+            </NsToggle>
 
             <h4 class="mg-bottom">{{ $t("settings.queues") }}</h4>
             <NsTextInput
@@ -259,6 +272,24 @@
                     ref="metrics_password"
                     class="mg-bottom"
                   />
+                  <NsToggle
+                    v-if="metrics_host"
+                    value="metricsPublic"
+                    :label="$t('settings.metrics_public')"
+                    v-model="metrics_public"
+                    :disabled="busy"
+                    class="mg-bottom"
+                  >
+                    <template #tooltip>
+                      {{ $t("settings.metrics_public_tooltip") }}
+                    </template>
+                    <template slot="text-left">{{
+                      $t("common.disabled")
+                    }}</template>
+                    <template slot="text-right">{{
+                      $t("common.enabled")
+                    }}</template>
+                  </NsToggle>
                   <cv-text-area
                     v-if="metrics_host"
                     :label="$t('settings.metrics_allowlist')"
@@ -331,6 +362,7 @@ export default {
       relayNetworksText: "",
       cluster_relay: true,
       cluster_relay_active: false,
+      trust_loopback: true,
       sink_enabled: false,
       cluster_network: "",
       node_address: "",
@@ -339,6 +371,7 @@ export default {
       metrics_host: "",
       metrics_password: "",
       metrics_password_set: false,
+      metrics_public: true,
       metricsAllowlistText: "",
       mailModules: [],
       loading: { getConfiguration: false, configureModule: false },
@@ -393,6 +426,7 @@ export default {
         this.max_message_size = c.max_message_size;
         this.relayNetworksText = c.relay_networks.join("\n");
         this.cluster_relay = c.cluster_relay;
+        this.trust_loopback = c.trust_loopback;
         this.sink_enabled = c.sink_enabled;
         this.cluster_relay_active = c.cluster_relay_active;
         this.cluster_network = c.cluster_network;
@@ -402,6 +436,7 @@ export default {
         this.metrics_host = c.metrics_host;
         this.metrics_password_set = c.metrics_password_set;
         this.metricsAllowlistText = c.metrics_allowlist.join("\n");
+        this.metrics_public = c.metrics_public !== false;
         this.mailModules = c.mail_modules;
         this.focusElement("hostname");
       } catch (failure) {
@@ -437,10 +472,12 @@ export default {
         max_message_size: parseInt(this.max_message_size),
         relay_networks: this.linesToList(this.relayNetworksText),
         cluster_relay: this.cluster_relay,
+        trust_loopback: this.trust_loopback,
         sink_enabled: this.sink_enabled,
         retry_interval: this.retry_interval,
         max_age: this.max_age,
         metrics_host: this.metrics_host,
+        metrics_public: this.metrics_public,
         metrics_allowlist: this.linesToList(this.metricsAllowlistText),
       };
       if (this.metrics_password) {

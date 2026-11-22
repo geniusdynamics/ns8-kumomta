@@ -347,6 +347,10 @@
                 "maxLength": 64
             }
         },
+        "metrics_public": {
+            "type": "boolean",
+            "description": "Metrics route reachable from the internet"
+        },
         "smarthost_password_set": {
             "type": "boolean"
         },

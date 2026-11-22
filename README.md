@@ -306,6 +306,23 @@ every scheduled queue gets a `custom_lua` delivery protocol that logs a
 a warning banner on every page and `get-configuration` returns a
 `sink_mode_enabled` warning. See [docs/sink-mode.md](docs/sink-mode.md).
 
+### Prometheus metrics
+
+With `metrics_host` (Settings, "Prometheus metrics"), `configure-module`
+publishes `https://<metrics_host>/metrics` (and `/metrics.json`) through
+Traefik. kumod requires the HTTP basic credentials of the `metrics` user
+(`metrics_password`, at least 12 characters). kumod answers 401 without a
+`WWW-Authenticate` challenge, so the route adds one: a browser asks for
+the user and password instead of showing `<Unauthenticated> ... not
+permitted GET`. The Status page links to the URL.
+
+`metrics_public` (on by default, "Allow access from the internet") keeps
+the route reachable from anywhere. Off, the route is limited to private
+networks (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`,
+`100.64.0.0/10`, `fc00::/7`, loopback), the cluster network and
+`metrics_allowlist`. With it on, a non-empty `metrics_allowlist` limits
+the route to those networks. The password is required in every case.
+
 ### Live views
 
 `get-queue-status` reads `/metrics.json` of the local API.

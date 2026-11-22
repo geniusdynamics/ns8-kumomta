@@ -33,7 +33,14 @@
     "configure": "Configure",
     "mta": "KumoMTA mail transfer agent",
     "listening_on": "SMTP listeners on ports {ports}",
-    "open_queue": "Open the queue view"
+    "open_queue": "Open the queue view",
+    "metrics": "Prometheus metrics",
+    "metrics_not_published": "Metrics not published",
+    "metrics_public": "Prometheus metrics, reachable from the internet, user 'metrics'",
+    "metrics_allowlist_only": "Prometheus metrics, allowed networks only, user 'metrics'",
+    "metrics_private": "Prometheus metrics, private networks only, user 'metrics'",
+    "open_metrics": "Open metrics",
+    "configure_metrics": "Publish metrics"
   },
   "settings": {
     "title": "Settings",
@@ -64,11 +71,11 @@
     "max_age": "Maximum queue time",
     "duration_helper": "For example 20m, 2h, 5d",
     "metrics": "Prometheus metrics",
-    "metrics_description": "Optional: publish /metrics of KumoMTA through Traefik, protected by HTTP basic authentication of the user 'metrics'. The administration API is never published",
+    "metrics_description": "Optional: publish /metrics of KumoMTA through Traefik, protected by HTTP basic authentication of the user 'metrics'. A browser asks for that user and password. The administration API is never published",
     "metrics_host": "Metrics host name",
     "metrics_password": "Password of the 'metrics' user",
     "metrics_allowlist": "Allowed networks",
-    "metrics_allowlist_helper": "Optional. One IP address or CIDR network per line",
+    "metrics_allowlist_helper": "Optional. One IP address or CIDR network per line. With internet access on, only these networks are allowed when the list is not empty",
     "mail_modules_on_node": "Other mail modules on this node",
     "mail_modules_on_node_description": "{modules}: their mail ports cannot be used. Disable the inbound listener and choose another submission port to run as an outbound relay next to them",
     "cluster_relay_off": "Cluster relay is off",
@@ -81,7 +88,9 @@
     "sink_tooltip": "KumoMTA accepts every message and discards it instead of delivering it, and logs a Delivery record. Recipients whose local part contains tempfail or permfail simulate a deferral or a bounce. Never use it in production",
     "sink_description": "While sink mode is on, no message leaves this server: outbound mail, relayed inbound mail and the queued messages are accepted and discarded",
     "trust_loopback": "Trust the loopback",
-    "trust_loopback_tooltip": "Services of this node connecting from the loopback (127.0.0.1, ::1) relay without SMTP authentication. Turn it off to require SMTP authentication from them too"
+    "trust_loopback_tooltip": "Services of this node connecting from the loopback (127.0.0.1, ::1) relay without SMTP authentication. Turn it off to require SMTP authentication from them too",
+    "metrics_public": "Allow access from the internet",
+    "metrics_public_tooltip": "Off: only private networks (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10, fc00::/7), the cluster network and the allowed networks below reach the metrics. The password is required in both cases"
   },
   "about": {
     "title": "About"

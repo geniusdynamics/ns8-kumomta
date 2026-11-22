@@ -8,7 +8,10 @@
 # Optional Traefik route to the Prometheus metrics of kumod: only the
 # /metrics path of the metrics host name. kumod itself requires the HTTP
 # basic credentials of the "metrics" user (acl.toml grants it /metrics and
-# /metrics.json only); the admin API is never routed.
+# /metrics.json only); the admin API is never routed. kumod answers 401
+# without a WWW-Authenticate challenge, so the route adds one: a browser
+# then asks for the user and password. Without public access the route is
+# limited to private networks and the cluster network.
 #
 # Optional API host name of the sending platforms: /api/inject goes to
 # kumod (integration credentials, acl.toml grants them /api/inject only),
@@ -32,9 +35,11 @@ if settings["metrics_host"]:
         'strip_prefix': False,
         'http2https': True,
         'lets_encrypt': settings["lets_encrypt"],
+        'headers': {'response': {'WWW-Authenticate': 'Basic realm="KumoMTA metrics", charset="UTF-8"'}},
     }
-    if settings["metrics_allowlist"]:
-        route['ip_allowlist'] = settings["metrics_allowlist"]
+    allowlist = kumo.metrics_allowlist(settings)
+    if allowlist:
+        route['ip_allowlist'] = allowlist
     agent.set_route(route)
 else:
     traefik_id = agent.resolve_agent_id('traefik@node')

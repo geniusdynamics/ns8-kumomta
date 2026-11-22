@@ -310,6 +310,10 @@
                 "maxLength": 64
             }
         },
+        "metrics_public": {
+            "type": "boolean",
+            "description": "Metrics route reachable from the internet; false limits it to private networks, the cluster network and metrics_allowlist"
+        },
         "sink_enabled": {
             "type": "boolean",
             "description": "Testing only: accept and discard every outbound message instead of delivering it (Delivery records are still logged)"

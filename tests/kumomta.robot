@@ -26,6 +26,8 @@ ${HOOK_FILE}       /root/kumomta_webhook.jsonl
 ${HOOK_PORT}       18300
 ${HOOK_TOKEN}      ci-webhook-bearer-token
 ${HOOK_SECRET}     ci-webhook-signing-secret-2026
+${METRICS_HOST}    mta-metrics.ns8-ci.test
+${METRICS_PASS}    CiMetricsPass2026
 
 *** Keywords ***
 Run action
@@ -137,6 +139,16 @@ Webhook record is valid
     Should Be Equal As Integers    ${rc}  0    ${output}
     RETURN    ${output}
 
+Metrics answer
+    [Arguments]    ${credentials}    ${expected}
+    ${auth} =    Set Variable If    '${credentials}' != ''    -u '${credentials}'    ${EMPTY}
+    ${output}  ${rc} =    Execute Command    curl -sk -D - -o /dev/null --max-time 30 --resolve ${METRICS_HOST}:443:127.0.0.1 ${auth} https://${METRICS_HOST}/metrics
+    ...    return_rc=True
+    Should Be Equal As Integers    ${rc}  0    ${output}
+    ${output} =    Evaluate    $output.lower()
+    Should Match Regexp    ${output}    ^http/\\S+ ${expected}
+    RETURN    ${output}
+
 State file
     [Arguments]    ${command}
     ${output}  ${rc} =    Execute Command    runagent -m ${module_id} ${command}
@@ -224,6 +236,17 @@ Check if the admin API needs authentication
     ${config} =    Get configuration
     ${output} =    Execute Command    curl -s -o /dev/null -w '\%{http_code}' http://127.0.0.1:${config}[api_port]/metrics.json
     Should Be Equal    ${output}    401
+
+Check if the metrics route asks for the metrics user
+    ${result} =    Configure    {"metrics_host":"${METRICS_HOST}","metrics_password":"${METRICS_PASS}","metrics_public":false}
+    ${config} =    Get configuration
+    Should Not Be True    ${config}[metrics_public]
+    ${output} =    Wait Until Keyword Succeeds    1 min    5 sec    Metrics answer    ${EMPTY}    401
+    Should Contain    ${output}    www-authenticate: Basic
+    Wait Until Keyword Succeeds    1 min    5 sec    Metrics answer    metrics:${METRICS_PASS}    200
+    ${result} =    Configure    {"metrics_public":true}
+    Wait Until Keyword Succeeds    1 min    5 sec    Metrics answer    metrics:${METRICS_PASS}    200
+    [Teardown]    Configure    {"metrics_host":""}
 
 Check if an authenticated submission is accepted and queued
     ${output}  ${rc} =    Execute Command    python3 ${CHECK} submit 127.0.0.1 587 ${SMTP_USER} '${SMTP_PASS}' ci@${TEST_DOMAIN} user@${DEFER_DOMAIN}

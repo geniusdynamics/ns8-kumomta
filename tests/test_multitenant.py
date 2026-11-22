@@ -78,6 +78,30 @@ class RenderTest(unittest.TestCase):
         self.assertEqual(table["max_message_rate"], "100/h")
 
 
+class MetricsAllowlistTest(unittest.TestCase):
+    def setUp(self):
+        self.settings = kumo.load_settings()
+        p = patch.object(kumo, "cluster_info", return_value=("10.5.4.0/24", "10.5.4.1"))
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_public_without_allowlist_is_open(self):
+        self.assertTrue(self.settings["metrics_public"])
+        self.assertEqual(kumo.metrics_allowlist(self.settings), [])
+
+    def test_public_with_allowlist_keeps_it(self):
+        self.settings["metrics_allowlist"] = ["203.0.113.7/32"]
+        self.assertEqual(kumo.metrics_allowlist(self.settings), ["203.0.113.7/32"])
+
+    def test_private_adds_private_and_cluster_networks(self):
+        self.settings["metrics_public"] = False
+        self.settings["metrics_allowlist"] = ["203.0.113.7/32"]
+        allow = kumo.metrics_allowlist(self.settings)
+        for net in ("192.168.0.0/16", "10.0.0.0/8", "10.5.4.0/24", "203.0.113.7/32"):
+            self.assertIn(net, allow)
+        self.assertEqual(len(allow), len(set(allow)))
+
+
 class TsaTrustTest(unittest.TestCase):
     def setUp(self):
         temp = tempfile.TemporaryDirectory()

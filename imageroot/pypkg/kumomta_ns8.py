@@ -113,6 +113,9 @@ DEFAULTS = {
     "vault_key": "",
     "metrics_host": "",
     "metrics_allowlist": [],
+    # Metrics route reachable from the internet; off limits it to private
+    # networks, the cluster network and metrics_allowlist
+    "metrics_public": True,
     # Testing: accept and discard every outbound message (no delivery)
     "sink_enabled": False,
     # Sending platforms: integration credentials (hashes in secrets),
@@ -468,6 +471,20 @@ def is_ip_address(value):
         return True
     except ValueError:
         return False
+
+
+# Private and local networks: the metrics route without public access
+PRIVATE_NETWORKS = ["127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
+                    "100.64.0.0/10", "::1/128", "fc00::/7"]
+
+
+def metrics_allowlist(settings):
+    """ip_allowlist of the metrics route, empty for no restriction"""
+    allow = list(settings["metrics_allowlist"])
+    if not settings["metrics_public"]:
+        cnet, _ = cluster_info()
+        allow = PRIVATE_NETWORKS + ([normalize_network(cnet)] if cnet else []) + allow
+    return list(dict.fromkeys(allow))
 
 
 def cluster_info():

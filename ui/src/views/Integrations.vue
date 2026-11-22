@@ -126,9 +126,35 @@
                 :disabled="busy"
               />
               <NsTextInput
+                v-if="!integ.tenant"
+                :label="$t('integrations.tenant_prefix')"
+                v-model.trim="integ.tenant_prefix"
+                :helper-text="$t('integrations.tenant_prefix_helper')"
+                placeholder="platform1-"
+                :disabled="busy"
+              />
+              <NsTextInput
                 :label="$t('integrations.max_message_rate')"
                 v-model.trim="integ.max_message_rate"
+                :helper-text="
+                  integ.tenant
+                    ? $t('integrations.max_message_rate_fixed_helper')
+                    : $t('integrations.max_message_rate_multi_helper')
+                "
                 placeholder="1000/h"
+                :disabled="busy"
+                class="rate"
+              />
+              <NsTextInput
+                :label="$t('integrations.max_domains')"
+                v-model.number="integ.max_domains"
+                type="number"
+                min="0"
+                :helper-text="
+                  $t('integrations.max_domains_helper', {
+                    count: integ.domains_count,
+                  })
+                "
                 :disabled="busy"
                 class="rate"
               />
@@ -324,8 +350,11 @@ export default {
         isNew: true,
         name: "",
         tenant: "",
+        tenant_prefix: "",
         scopes: ["inject", "domains"],
         max_message_rate: "",
+        max_domains: 0,
+        domains_count: 0,
         password: "",
         password_set: false,
         generated: false,
@@ -357,8 +386,10 @@ export default {
             const out = {
               name: i.name,
               tenant: i.tenant || "",
+              tenant_prefix: i.tenant ? "" : i.tenant_prefix || "",
               scopes: i.scopes,
               max_message_rate: i.max_message_rate || "",
+              max_domains: Math.max(0, parseInt(i.max_domains, 10) || 0),
             };
             if (i.password) {
               out.password = i.password;

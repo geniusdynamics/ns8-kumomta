@@ -136,8 +136,10 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if parts == ["whoami"] and method == "GET":
                 self.reply(200, {"name": name, "tenant": integ.get("tenant") or "",
+                                 "tenant_prefix": integ.get("tenant_prefix") or "",
                                  "scopes": integ.get("scopes") or [],
-                                 "max_message_rate": integ.get("max_message_rate") or ""})
+                                 "max_message_rate": integ.get("max_message_rate") or "",
+                                 "max_domains": int(integ.get("max_domains") or 0)})
             elif parts == ["domains"] and method == "GET":
                 settings = kumo.load_settings()
                 self.reply(200, {"domains": [kumo.domain_view(settings, d) for d in settings["domains"]
@@ -145,14 +147,22 @@ class Handler(BaseHTTPRequestHandler):
                                  "require_verified_domains": bool(settings["require_verified_domains"])})
             elif parts == ["domains"] and method == "POST":
                 data = self.body()
-                tenant = data.get("tenant") or integ.get("tenant") or ""
+                tenant = str(data.get("tenant") or integ.get("tenant") or "")
                 if integ.get("tenant") and tenant != integ["tenant"]:
                     self.error(422, "invalid_tenant", "the credential is bound to its own tenant")
                     return
+                if tenant and not kumo.integration_tenant_allowed(integ, tenant):
+                    self.error(422, "invalid_tenant",
+                               f"tenant labels of this credential start with '{integ.get('tenant_prefix') or ''}'")
+                    return
                 with kumo.settings_lock():
                     settings = kumo.load_settings()
+                    limit = int(integ.get("max_domains") or 0)
+                    if limit and sum(1 for d in settings["domains"] if (d.get("owner") or "") == name) >= limit:
+                        self.error(403, "domain_quota", f"the credential may add at most {limit} domains")
+                        return
                     entry = kumo.add_domain(settings, str(data.get("domain") or ""), str(data.get("selector") or ""),
-                                            name, str(tenant), data.get("dkim_private_key") or None)
+                                            name, tenant, data.get("dkim_private_key") or None)
                     kumo.save_settings(settings)
                     kumo.apply_policy()
                 self.reply(201, kumo.domain_view(settings, entry))

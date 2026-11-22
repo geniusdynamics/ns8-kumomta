@@ -18,7 +18,7 @@ credential. Plain HTTP redirects to HTTPS.
 | Status | Meaning |
 |---|---|
 | 401 | missing or wrong credential |
-| 403 | the credential lacks the scope of the endpoint |
+| 403 | the credential lacks the scope of the endpoint, or `domain_quota`: it already has `max_domains` domains |
 | 404 | unknown path, or a domain that does not exist or belongs to someone else |
 | 409 | the domain already exists or its selector has a conflicting key |
 | 422 | invalid input (`error` says which) |
@@ -77,7 +77,7 @@ recipient is counted in `fail_count`, with the reason in `errors`, e.g.
 
 ```
 curl -u platform1:$SECRET $API/api/v1/whoami
-{"name": "platform1", "tenant": "", "scopes": ["inject", "domains"], "max_message_rate": ""}
+{"name": "platform1", "tenant": "", "tenant_prefix": "platform1-", "scopes": ["inject", "domains"], "max_message_rate": "", "max_domains": 0}
 ```
 
 ### List the domains
@@ -104,7 +104,7 @@ curl -u platform1:$SECRET -H 'Content-Type: application/json' \
 |---|---|---|
 | `domain` | yes | lowercase is applied |
 | `selector` | no | default `kumo1` |
-| `tenant` | no | must equal the credential's tenant when it has one |
+| `tenant` | no | must equal the credential's tenant when it has one, else start with its `tenant_prefix` |
 | `dkim_private_key` | no | PEM key to import instead of generating one |
 
 In a cluster using local DKIM storage, supply the common key or provision
@@ -153,7 +153,7 @@ stored key. [Cluster DKIM setup](cluster.md#dkim-keys-in-a-cluster)
 
 Submission listener (default port 587), STARTTLS then `AUTH PLAIN` with a
 credential that has the `smtp` scope. Same domain policy and tenant rules
-as the HTTP injection; `X-Tenant`, `X-Campaign` and `X-Message-Ref`
+as the HTTP injection; `X-Tenant` (within the `tenant_prefix`), `X-Campaign` and `X-Message-Ref`
 headers work the same way.
 
 ## NS8 actions

@@ -41,8 +41,10 @@ or with `configure-module`:
     "name": "platform1",
     "password": "a-long-random-secret-of-16+-chars",
     "tenant": "",
+    "tenant_prefix": "platform1-",
     "scopes": ["inject", "domains"],
-    "max_message_rate": ""
+    "max_message_rate": "",
+    "max_domains": 0
   }]
 }
 ```
@@ -58,10 +60,24 @@ or with `configure-module`:
   - `domains`: the domain management API `/api/v1/*`.
 - `tenant`: when set, every message of the credential gets this KumoMTA
   tenant, whatever the headers say: use it when one credential is one
-  customer. Leave it empty when one credential serves many customers and
-  the platform sets `X-Tenant` itself.
-- `max_message_rate`: optional sending rate of that tenant, e.g. `1000/h`.
-  Messages over the rate wait in their queue; they are not rejected.
+  customer. Leave it empty for a **multi-tenant** credential, when one
+  credential serves many customers and the platform sets `X-Tenant`
+  itself (a sending platform such as Bonga).
+- `tenant_prefix` (multi-tenant credentials): the tenant labels the
+  credential may use, in `X-Tenant` and as the tenant of the domains it
+  adds, must start with this prefix, e.g. `platform1-`. A message naming
+  another tenant is rejected (`550 5.7.1 tenant ... is not allowed`), so a
+  platform cannot use the tenant of another credential. Empty allows any
+  tenant label.
+- `max_message_rate`: optional sending rate, e.g. `1000/h`. With a fixed
+  tenant, the rate of that tenant. For a multi-tenant credential, the rate
+  of **each** of its tenants (every customer gets this rate), and of its
+  messages without a tenant together. Messages over the rate wait in
+  their queue; they are not rejected.
+- `max_domains`: how many sending domains the credential may add through
+  the domain API; `0` (default) for no limit. Over the limit the API
+  answers `403 domain_quota`. The Integrations page shows the domains in
+  use.
 
 `api_host` publishes two Traefik routes on that host name, HTTPS only
 (HTTP redirects), with Let's Encrypt when the Settings page asks for it:
@@ -96,10 +112,15 @@ or bounce one tenant's queues.
 
 - `X-Tenant: <customer-id>` and `X-Campaign: <campaign-id>` headers (SMTP,
   or `content.headers` of an injection) set the tenant and the campaign.
-  The module removes these headers before delivery.
+  The module removes these headers before delivery. Labels are up to 64
+  letters, digits, dots, underscores or hyphens; others are ignored, and
+  an integration sending an invalid `X-Tenant` gets its message rejected.
 - A credential with a fixed `tenant` overrides `X-Tenant`.
+- A multi-tenant credential may name only tenants within its
+  `tenant_prefix`.
 - A domain added with a `tenant` gives that tenant to the messages of a
   credential without tenant, when the header is missing.
+- SMTP users and trusted networks can set `X-Tenant` too.
 - The tenant and the campaign appear in the webhook records (`meta.tenant`,
   `meta.campaign`, and in `queue`).
 

@@ -104,10 +104,34 @@ local function check_password(entry, password)
     and kumo.digest.sha256(entry.salt .. password).hex == entry.sha256
 end
 
+-- Tenant and campaign labels: the syntax of the configured tenants, so
+-- they are safe in queue names, metrics and logs
+local function routing_label(value)
+  if value and value ~= '' and #value <= 64 and value:match '^[A-Za-z0-9._-]+$' then
+    return value
+  end
+  return nil
+end
+
+-- A multi-tenant credential (no fixed tenant) may name any tenant within
+-- its tenant_prefix; a credential with a fixed tenant only that one
+local function integration_tenant_allowed(integ, tenant)
+  if not routing_label(tenant) then
+    return false
+  end
+  if integ.tenant and integ.tenant ~= '' then
+    return tenant == integ.tenant
+  end
+  local prefix = integ.tenant_prefix or ''
+  return tenant:sub(1, #prefix) == prefix
+end
+
 -- Messages of an integration: the From domain must be a sending domain
 -- of this MTA, owned by the integration or by the administrator, and
--- verified unless require_verified_domains is off. The tenant of the
--- integration, if any, wins over the X-Tenant header.
+-- verified unless require_verified_domains is off. Tenant, in order: the
+-- fixed tenant of the credential, the X-Tenant header (within the
+-- tenant_prefix of the credential, else the message is rejected), the
+-- tenant of the sending domain.
 local function apply_integration_policy(msg, name, integ)
   local from = msg:from_header()
   if not from then
@@ -126,25 +150,37 @@ local function apply_integration_policy(msg, name, integ)
     kumo.reject(550, string.format('5.7.1 sending domain %s is not verified', domain))
   end
   local tenant = integ.tenant
-  if (not tenant or tenant == '') and entry.tenant and entry.tenant ~= '' then
-    tenant = entry.tenant
+  if not tenant or tenant == '' then
+    local header = msg:get_meta 'x_tenant'
+    if header and header ~= '' then
+      if not integration_tenant_allowed(integ, header) then
+        kumo.reject(550, string.format('5.7.1 tenant %s is not allowed for this credential',
+          routing_label(header) or '(invalid label)'))
+      end
+      tenant = header
+    elseif entry.tenant and entry.tenant ~= '' then
+      tenant = entry.tenant
+    end
   end
   if tenant and tenant ~= '' then
     msg:set_meta('tenant', tenant)
   end
+  msg:set_meta('ns8_integration', name)
 end
 
 -- X-Tenant and X-Campaign headers select the tenant and campaign of the
--- message (KumoMTA queue name campaign:tenant@domain), and are removed.
+-- message (KumoMTA queue name campaign:tenant@domain), and are removed
+-- before delivery. Labels outside the tenant syntax are ignored; the
+-- integration policy checks the tenant of an integration afterwards.
 -- X-Message-Ref is kept and logged (meta x_message_ref) for correlation.
 local function import_tenant_campaign(msg)
   msg:import_x_headers { 'x-tenant', 'x-campaign', 'x-message-ref' }
-  local tenant = msg:get_meta 'x_tenant'
-  local campaign = msg:get_meta 'x_campaign'
-  if tenant and tenant ~= '' then
+  local tenant = routing_label(msg:get_meta 'x_tenant')
+  local campaign = routing_label(msg:get_meta 'x_campaign')
+  if tenant then
     msg:set_meta('tenant', tenant)
   end
-  if campaign and campaign ~= '' then
+  if campaign then
     msg:set_meta('campaign', campaign)
   end
   msg:remove_x_headers { 'x-tenant', 'x-campaign' }
@@ -223,12 +259,15 @@ if INIT.webhook then
 end
 
 kumo.on('init', function()
+  -- LocalDisk is the KumoMTA default: one file per message
   kumo.define_spool {
     name = 'data',
+    kind = 'LocalDisk',
     path = '/var/spool/kumomta/data',
   }
   kumo.define_spool {
     name = 'meta',
+    kind = 'LocalDisk',
     path = '/var/spool/kumomta/meta',
   }
 
@@ -447,17 +486,35 @@ kumo.on('http_message_generated', function(msg)
   dkim_sign(msg)
 end)
 
--- Per-tenant sending rate of the integrations (max_message_rate): the
--- messages wait in their scheduled queue instead of being rejected
+-- Sending rate of the integrations (max_message_rate): the messages wait
+-- in their scheduled queue instead of being rejected
 kumo.on('throttle_insert_ready_queue', function(msg)
   local tenant = msg:get_meta 'tenant'
-  if not tenant or tenant == '' then
+  if tenant == '' then
+    tenant = nil
+  end
+  local name = msg:get_meta 'ns8_integration'
+  local integ = name and integrations()[name]
+  if integ then
+    -- Message of an integration: the rate of its credential, per tenant
+    -- (each customer of a multi-tenant credential has its own), or per
+    -- credential for the messages without a tenant
+    local rate = integ.max_message_rate
+    if rate and rate ~= '' then
+      local key = tenant and ('ns8-tenant-' .. tenant) or ('ns8-integration-' .. name)
+      kumo.make_throttle(key, rate):delay_message_if_throttled(msg)
+    end
     return
   end
-  for name, integ in pairs(integrations()) do
-    if integ.tenant == tenant and integ.max_message_rate and integ.max_message_rate ~= '' then
+  if not tenant then
+    return
+  end
+  -- SMTP users and trusted networks: the rate of a credential with this
+  -- fixed tenant, if any
+  for _, other in pairs(integrations()) do
+    if other.tenant == tenant and other.max_message_rate and other.max_message_rate ~= '' then
       kumo
-        .make_throttle('ns8-tenant-' .. tenant, integ.max_message_rate)
+        .make_throttle('ns8-tenant-' .. tenant, other.max_message_rate)
         :delay_message_if_throttled(msg)
       return
     end

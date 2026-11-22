@@ -186,8 +186,11 @@ Messages of an integration must come `From:` a sending domain of the MTA,
 owned by it or by the administrator, and verified (DKIM and SPF found in
 the DNS) while `require_verified_domains` is on. `X-Tenant` and
 `X-Campaign` set the KumoMTA tenant and campaign (per-customer queues), a
-tenant bound to the credential wins, and `max_message_rate` throttles the
-tenant. The log records and the webhook carry `meta.tenant`,
+tenant bound to the credential wins, a multi-tenant credential may name
+only tenants within its `tenant_prefix`, and `max_message_rate` throttles
+the tenant (each tenant of a multi-tenant credential). `max_domains` caps
+the domains a credential adds through the API (0, the default, for no
+limit). The log records and the webhook carry `meta.tenant`,
 `meta.campaign` and the per-recipient injection `metadata` (`meta.extra`),
 with the IANA `bounce_classification`. With `bounce_domain`, the inbound
 listener accepts mail for it and for `bounces.<sending domain>` and logs
@@ -281,6 +284,16 @@ off: the cluster network leaves `relay_hosts.toml` and the
 lists the module and unauthenticated mail from the cluster addresses can
 only reach the inbound domains.
 
+### Loopback trust
+
+Clients connecting from the loopback of the node (`127.0.0.0/8`, `::1`)
+relay without SMTP AUTH by default, like the trusted networks: other
+services of the host can send through the MTA. The "Trust the loopback"
+toggle of the Settings page (`"trust_loopback": false`) removes the
+loopback from `relay_hosts.toml`; those clients then need a submission
+user or an integration credential to relay, and can still deliver to the
+inbound domains. The module's own HTTP API user is not affected.
+
 ### Sink mode (testing)
 
 `"sink_enabled": true` (Settings, "Sink mode (testing)", off by default)
@@ -304,8 +317,10 @@ kept 7 days (`kumomta-logs-cleanup.timer`).
 
 `state-include.conf` covers `settings.json`, `secrets/`, `openbao.env`,
 `dkim/` (the integration credentials are under `secrets/`), the rendered
-policy and the `kumomta-spool` volume. Before the
-backup `module-dump-state` asks kumod to flush its RocksDB spool. Restore
+policy and the `kumomta-spool` volume. The spool uses the KumoMTA
+`LocalDisk` backend (one file per message, no database to flush), so it
+is copied as is; a message written during the backup may be missing from
+it. Stop kumod first when an exact copy of the queue is needed. Restore
 and clone call `configure-module` with every setting and `lets_encrypt`
 off.
 

@@ -1,9 +1,0 @@
-#!/bin/bash
-
-#
-# Copyright (C) 2026 Genius Dynamics
-# SPDX-License-Identifier: GPL-3.0-or-later
-#
-
-# Nothing to clean up: module-dump-state writes no file
-exit 0

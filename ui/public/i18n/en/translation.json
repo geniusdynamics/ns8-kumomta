@@ -79,7 +79,9 @@
     "testing": "Testing",
     "sink_enabled": "Sink mode (testing)",
     "sink_tooltip": "KumoMTA accepts every message and discards it instead of delivering it, and logs a Delivery record. Recipients whose local part contains tempfail or permfail simulate a deferral or a bounce. Never use it in production",
-    "sink_description": "While sink mode is on, no message leaves this server: outbound mail, relayed inbound mail and the queued messages are accepted and discarded"
+    "sink_description": "While sink mode is on, no message leaves this server: outbound mail, relayed inbound mail and the queued messages are accepted and discarded",
+    "trust_loopback": "Trust the loopback",
+    "trust_loopback_tooltip": "Services of this node connecting from the loopback (127.0.0.1, ::1) relay without SMTP authentication. Turn it off to require SMTP authentication from them too"
   },
   "about": {
     "title": "About"
@@ -319,6 +321,7 @@
     "integration_password_too_short": "At least 16 characters",
     "scope_required": "Choose at least one scope",
     "invalid_tenant": "Invalid tenant",
+    "invalid_tenant_prefix": "Invalid tenant prefix: letters, digits, dots, underscores and hyphens",
     "api_port_missing": "The module has no second TCP port: update it",
     "invalid_spf_mechanism": "Invalid SPF mechanism",
     "domain_exists": "The domain already exists",
@@ -374,7 +377,7 @@
     "no_integrations": "No integrations",
     "name": "Name (user name)",
     "tenant": "Tenant",
-    "tenant_helper": "Optional: forced on its messages. Empty lets X-Tenant choose",
+    "tenant_helper": "Fixed tenant of every message. Leave empty for a multi-tenant credential: the X-Tenant header chooses the tenant",
     "max_message_rate": "Rate of the tenant",
     "scope_inject": "HTTP injection",
     "scope_smtp": "SMTP submission",
@@ -385,7 +388,13 @@
     "copy_password_now": "Copy the password now",
     "copy_password_now_description": "It is shown only here, before saving: the module keeps only a hash",
     "add_integration": "Add integration",
-    "saving": "Saving integrations"
+    "saving": "Saving integrations",
+    "tenant_prefix": "Tenant prefix",
+    "tenant_prefix_helper": "Multi-tenant credential: X-Tenant and domain tenants must start with this prefix. Empty allows any tenant",
+    "max_message_rate_fixed_helper": "Rate of the tenant. Empty for no limit",
+    "max_message_rate_multi_helper": "Rate of each tenant of the credential. Empty for no limit",
+    "max_domains": "Domain limit",
+    "max_domains_helper": "Domains it may add through the API, 0 for no limit. In use: {count}"
   },
   "cluster": {
     "title": "Cluster",

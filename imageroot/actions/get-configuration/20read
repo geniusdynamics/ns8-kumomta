@@ -29,7 +29,13 @@ config["vault_token_set"] = bool(kumo.read_openbao_env().get("VAULT_TOKEN"))
 config["webhook_signing_secret_set"] = bool(settings["webhook_signing_secret_set"])
 config["cluster_redis_password_set"] = bool(settings["cluster_redis_password_set"])
 hashes = kumo.read_integrations_secrets()
-config["integrations"] = [dict(i, password_set=i["name"] in hashes) for i in settings["integrations"]]
+owned = {}
+for dom in settings["domains"]:
+    if dom.get("owner"):
+        owned[dom["owner"]] = owned.get(dom["owner"], 0) + 1
+config["integrations"] = [dict({"tenant_prefix": "", "max_domains": 0}, **i, password_set=i["name"] in hashes,
+                               domains_count=owned.get(i["name"], 0))
+                          for i in settings["integrations"]]
 config["spf_mechanism"] = kumo.spf_mechanism(settings) if settings["hostname"] else ""
 config["api_endpoints"] = {
     "inject": f"https://{settings['api_host']}/api/inject/v1",

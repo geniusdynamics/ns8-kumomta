@@ -190,7 +190,8 @@ large mailbox providers, and the per-domain settings of the module.
 - Clustered: `tsa_enabled` makes the instance a **designated TSA host**,
   chosen when the store is set up or when the instance joins (a join does
   not copy it: it is off unless checked). Only designated hosts run
-  tsa-daemon, on the cluster VPN address, trusting the cluster network.
+  tsa-daemon, on the cluster VPN address, trusting the VPN addresses of
+  the peers that use the same store.
   Every kumod of the store publishes its log records to all the
   designated hosts (from the peer records) and subscribes to its own
   daemon, or to one designated host when it is not one, as in the KumoMTA
@@ -294,10 +295,15 @@ is not offered yet.
   NS8 stores reveal task results under the source module for eight hours,
   accessible to cluster administrators.
 - tsa-daemon has no authentication: kumod's TSA client sends no
-  credentials, so the access is by source address (the cluster network).
-  The port listens on the VPN address only and NS8 accepts the cluster
-  network in firewalld's `trusted` zone: no port is opened to the public
-  zone. Any node of the NS8 cluster can reach it.
+  credentials, so the access is by source address. The daemon trusts the
+  loopback and the VPN addresses of the kumomta peers of the same store,
+  taken from their cluster records and checked against the VPN address of
+  the node running each one, so another module of the cluster cannot add
+  itself. tsa-daemon reads the list at startup: the cluster check (events
+  and 5-minute timer) restarts it when a peer joins or leaves. If the
+  records cannot be read, it trusts the cluster network, as before, so the
+  shaping feed keeps working. The port listens on the VPN address only and
+  no port is opened to the public zone.
 
 ## Restore, clone, upgrade, removal
 

@@ -241,7 +241,7 @@
     "description": "Optional: read the secrets of KumoMTA (DKIM private keys, smarthost password, webhook token) from OpenBao or Vault (KV version 2) instead of local files. The address and the token are stored in a file readable only by the module, and never written in the KumoMTA policy.",
     "enabled": "Read secrets from OpenBao",
     "enabled_tooltip": "KumoMTA reads VAULT_ADDR and VAULT_TOKEN from its environment. Secrets live under <mount>/<path>/dkim/<domain>/<selector>, <path>/smarthost and <path>/webhook",
-    "discovered": "OpenBao instances of the cluster",
+    "discovered": "OpenBao instance",
     "address": "Server URL (VAULT_ADDR)",
     "address_helper": "For example https://vault.example.org",
     "token": "Token (VAULT_TOKEN)",
@@ -266,7 +266,14 @@
     "disable_anyway": "Turn off anyway",
     "items_unavailable_title": "Some secrets were left in OpenBao",
     "items_unavailable_description": "No longer available to KumoMTA: {items}. Generate or set them again",
-    "item_webhook_signing_secret": "Webhook signing secret"
+    "item_webhook_signing_secret": "Webhook signing secret",
+    "source": "OpenBao server",
+    "source_cluster": "OpenBao of this cluster",
+    "source_manual": "Other OpenBao or Vault (address)",
+    "unpublished_title": "{name} is installed but cannot be selected",
+    "unpublished_description": "Turn on \"Cluster network API\" in the settings of that OpenBao instance, then reload this page.",
+    "no_cluster_instance": "No OpenBao in this cluster",
+    "no_cluster_instance_description": "Install the OpenBao module and turn on its \"Cluster network API\", or enter the address of another OpenBao or Vault server."
   },
   "queue": {
     "title": "Queue",

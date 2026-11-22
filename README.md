@@ -262,9 +262,12 @@ an `openbao_items_unavailable` warning with the same list. See
 [docs/openbao.md](docs/openbao.md).
 
 [geniusdynamics/ns8-openbao](https://github.com/geniusdynamics/ns8-openbao)
-publishes `module/<id>/srv/http/openbao` when its cluster network API is
-enabled: the UI lists those instances and offers the first one as default,
-and the manual URL remains the fallback.
+publishes `module/<id>/srv/http/openbao` when its "Cluster network API"
+is enabled. The OpenBao page offers two choices: "OpenBao of this
+cluster" (a list of those instances, the first one by default) and
+"Other OpenBao or Vault" (any URL). An openbao instance of the cluster
+without that API is named on the page with the setting to turn on, since
+it cannot be reached from the other nodes until then.
 
 ### Cluster smarthost
 

@@ -83,5 +83,9 @@ turn off" (when the token can read every item) or "Turn off anyway".
 ## Discovery
 
 [geniusdynamics/ns8-openbao](https://github.com/geniusdynamics/ns8-openbao)
-publishes `module/<id>/srv/http/openbao`; `list-openbao-servers` lists
-those instances and the UI offers them as `VAULT_ADDR`.
+publishes `module/<id>/srv/http/openbao` when its "Cluster network API"
+setting is on. `list-openbao-servers` returns those instances in
+`servers` (the UI choice "OpenBao of this cluster" sets `VAULT_ADDR` to
+one of them) and the other openbao instances of the cluster in
+`unpublished`: the UI names them with the setting to turn on. "Other
+OpenBao or Vault" takes any URL.

@@ -160,7 +160,14 @@ if settings["webhook_enabled"] and not settings["webhook_url"].startswith(("http
     error("webhook_url", settings["webhook_url"], "invalid_url")
 
 # OpenBao / Vault
-if settings["vault_enabled"]:
+if settings["vault_enabled"] and settings["vault_auth"] == "provisioned":
+    # Own token from an ns8-openbao instance; a pasted token, if any, is
+    # kept as the fallback
+    if not re.match(r"^[a-z][a-z0-9-]{0,62}[0-9]$", settings["vault_provider"] or ""):
+        error("vault_provider", settings["vault_provider"], "required")
+    if data.get("vault_token") and not settings["vault_address"].startswith(("http://", "https://")):
+        error("vault_address", settings["vault_address"], "invalid_url")
+elif settings["vault_enabled"]:
     if not settings["vault_address"].startswith(("http://", "https://")):
         error("vault_address", settings["vault_address"], "invalid_url")
     if not data.get("vault_token") and not kumo.read_openbao_env().get("VAULT_TOKEN"):

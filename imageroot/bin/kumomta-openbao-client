@@ -1,0 +1,35 @@
+#!/usr/bin/env python3
+
+#
+# Copyright (C) 2026 Genius Dynamics
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+
+# Timer step of provisioned mode (kumomta-openbao-client.timer, hourly):
+# provision the token once the OpenBao administrator approved the module,
+# renew it every 8 hours, provision again around day 25 or after a 403,
+# and fall back to the pasted token (or local secrets) when provisioning
+# is disabled or the approval revoked. kumod restarts when its
+# VAULT_ADDR/VAULT_TOKEN change. Never blocks the MTA: on errors the
+# current tokens and cached files are kept.
+
+import subprocess
+import sys
+import agent
+import kumomta_ns8 as kumo
+
+with kumo.settings_lock():
+    settings = kumo.load_settings()
+    previous = kumo.vault_view(settings)
+    status, warnings = kumo.provisioned_client_step(settings, previous)
+    if status in ("provisioned", "reprovisioned", "dropped") and settings["hostname"]:
+        changed, restart = kumo.write_config(settings)
+    else:
+        changed = restart = False
+print(f"OpenBao client: {status}", file=sys.stderr)
+for warning in warnings:
+    print(agent.SD_WARNING + f"OpenBao client: {warning['id']} {' '.join(warning['items'])}", file=sys.stderr)
+if restart:
+    subprocess.run(["systemctl", "--user", "try-restart", "kumomta.service"], check=False)
+elif changed:
+    subprocess.run(["kumomta-reload"], check=False)

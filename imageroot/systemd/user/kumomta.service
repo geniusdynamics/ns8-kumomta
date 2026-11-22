@@ -22,8 +22,9 @@ After=network-online.target
 [Service]
 Environment=PODMAN_SYSTEMD_UNIT=%n
 EnvironmentFile=%S/state/environment
-# VAULT_ADDR and VAULT_TOKEN of the OpenBao/Vault key sources (0600)
-EnvironmentFile=-%S/state/openbao.env
+# VAULT_ADDR and VAULT_TOKEN of the OpenBao/Vault key sources (0600):
+# the provisioned token, else the pasted one (kumomta_ns8.write_kumod_env)
+EnvironmentFile=-%S/state/openbao-kumod.env
 WorkingDirectory=%S/state
 Restart=always
 RestartSec=10

@@ -122,13 +122,21 @@ def validation_failed(field, code):
     sys.exit(3)
 
 
-# OpenBao / Vault environment of kumod (VAULT_ADDR, VAULT_TOKEN): 0600,
-# loaded by kumomta.service with EnvironmentFile=, never written in Lua
+# OpenBao / Vault. The pasted VAULT_ADDR and VAULT_TOKEN go to the 0600
+# file openbao.env (also the fallback of provisioned mode). Provisioned
+# mode gets the module's own token from ns8-openbao (0600 files under
+# openbao-client/). kumod gets the effective pair (openbao-kumod.env,
+# written by 30render), never in Lua.
+previous_view = kumo.vault_view(current)
 if settings["vault_enabled"]:
     token = data.get("vault_token") or kumo.read_openbao_env().get("VAULT_TOKEN", "")
-    kumo.write_openbao_env(settings["vault_address"], token)
+    if settings["vault_address"] and token:
+        kumo.write_openbao_env(settings["vault_address"], token)
 else:
     kumo.remove_openbao_env()
+_, client_warnings = kumo.provisioned_client_step(settings, previous_view)
+warnings.extend(client_warnings)
+kumo.write_file(kumo.WARNINGS_FILE, json.dumps(warnings), 0o600)
 
 
 LOCAL_NAMES = {"smarthost": "smarthost_password", "webhook": "webhook_token",
@@ -137,9 +145,14 @@ LOCAL_NAMES = {"smarthost": "smarthost_password", "webhook": "webhook_token",
 
 def store_secret(name, field, value):
     """Local 0600 file, or a KV v2 secret when OpenBao is enabled"""
-    if settings["vault_enabled"]:
+    if kumo.vault_on(settings):
         try:
             kumo.openbao_write(settings, kumo.openbao_secret_path(settings, name), value)
+            target = kumo.shared_target(settings)
+            if name == "cluster_redis" and target and target.get("source") == "group":
+                # Shared with the peers through the approved OpenBao group
+                kumo.openbao_write(settings, kumo.openbao_secret_path(settings, name, target=target), value,
+                                   target=target)
         except RuntimeError as ex:
             print(agent.SD_ERR + str(ex), file=sys.stderr)
             validation_failed(field, "openbao_write_failed")
@@ -151,7 +164,7 @@ def store_secret(name, field, value):
 if data.get("smarthost_password"):
     store_secret("smarthost", "smarthost_password", data["smarthost_password"])
     settings["smarthost_password_set"] = True
-elif not settings["vault_enabled"]:
+elif not kumo.vault_on(settings):
     settings["smarthost_password_set"] = bool(kumo.read_secret("smarthost_password"))
 
 if data.get("webhook_token_clear"):
@@ -160,7 +173,7 @@ if data.get("webhook_token_clear"):
 elif data.get("webhook_token"):
     store_secret("webhook", "webhook_token", data["webhook_token"])
     settings["webhook_token_set"] = True
-elif not settings["vault_enabled"]:
+elif not kumo.vault_on(settings):
     settings["webhook_token_set"] = bool(kumo.read_secret("webhook_token"))
 
 if data.get("webhook_signing_secret_clear"):
@@ -169,7 +182,7 @@ if data.get("webhook_signing_secret_clear"):
 elif data.get("webhook_signing_secret"):
     store_secret("webhook_signing", "webhook_signing_secret", data["webhook_signing_secret"])
     settings["webhook_signing_secret_set"] = True
-elif not settings["vault_enabled"]:
+elif not kumo.vault_on(settings):
     settings["webhook_signing_secret_set"] = bool(kumo.read_secret("webhook_signing_secret"))
 
 # Throttle store of the cluster. ns8-valkey: per-instance credentials
@@ -191,7 +204,7 @@ if settings["cluster_store"] == "manual":
         store_secret("cluster_redis", "cluster_redis_password", data["cluster_redis_password"])
         settings["cluster_redis_password_set"] = True
         kumo.bump_store_generation()  # kumod restarts with the new password
-    elif not settings["vault_enabled"]:
+    elif not kumo.vault_on(settings):
         settings["cluster_redis_password_set"] = bool(kumo.read_secret(kumo.CLUSTER_PASSWORD))
 else:
     settings["cluster_redis_password_set"] = False
@@ -271,7 +284,7 @@ for dom in settings["domains"]:
     if os.path.exists(keyfile) and not os.path.exists(pubfile):
         with open(keyfile) as fp:
             kumo.store_dkim_public(dom["domain"], dom["selector"], kumo.public_from_private(fp.read()))
-    if settings["vault_enabled"] or os.path.exists(keyfile) or os.path.exists(pubfile):
+    if kumo.vault_on(settings) or os.path.exists(keyfile) or os.path.exists(pubfile):
         continue
     if kumo.clustered(settings):
         # Cluster: every peer signs with the same key; it is generated once

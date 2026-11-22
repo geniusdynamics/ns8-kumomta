@@ -16,7 +16,7 @@ import agent
 import kumomta_ns8 as kumo
 
 settings = kumo.load_settings()
-if not settings["vault_enabled"]:
+if not kumo.vault_on(settings):
     agent.set_status('validation-failed')
     json.dump([{'field': 'vault_enabled', 'parameter': 'vault_enabled', 'value': False,
                 'error': 'openbao_not_enabled'}], fp=sys.stdout)

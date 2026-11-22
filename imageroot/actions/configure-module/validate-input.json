@@ -293,6 +293,8 @@
             "pattern": "^[A-Za-z0-9._-]{0,128}$",
             "description": "Field name of the secrets, empty for the KumoMTA default 'key'"
         },
+        "vault_auth": {"type": "string", "enum": ["token", "provisioned"], "description": "token: the pasted VAULT_TOKEN; provisioned: the module's own token issued by an ns8-openbao instance (client provisioning)"},
+        "vault_provider": {"type": "string", "pattern": "^([a-z][a-z0-9-]{0,62}[0-9])?$", "description": "Module ID of the ns8-openbao instance of provisioned mode, e.g. openbao1"},
         "metrics_host": {
             "type": "string",
             "maxLength": 253,

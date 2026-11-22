@@ -14,12 +14,20 @@ import sys
 import tempfile
 import types
 import unittest
+import urllib.request  # noqa: F401 (imported before the agent stub below)
 from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "imageroot/pypkg"))
 # Production loads this SDK from the NS8 core image.
-with patch.dict(sys.modules, {"agent": types.SimpleNamespace(SD_ERR="")}):
+
+
+def read_envfile(path):
+    with open(path) as fp:
+        return dict(line.split("=", 1) for line in fp.read().splitlines() if "=" in line)
+
+
+with patch.dict(sys.modules, {"agent": types.SimpleNamespace(SD_ERR="", SD_WARNING="", read_envfile=read_envfile)}):
     import kumomta_ns8 as kumo
 
 DOMAIN = "customer.example"
@@ -39,6 +47,10 @@ class ClusterDkimTest(unittest.TestCase):
         os.chdir(temp.name)
         self.settings = dict(kumo.DEFAULTS, cluster_store="manual", domains=[])
         self.key, self.pub = map(Path, kumo.dkim_paths(DOMAIN, SELECTOR))
+
+    def enable_vault(self):
+        self.settings["vault_enabled"] = True
+        kumo.write_openbao_env("http://vault.example", "test")
 
     def install(self, **kwargs):
         return kumo.install_dkim_key(self.settings, DOMAIN, SELECTOR, **kwargs)
@@ -73,15 +85,17 @@ class ClusterDkimTest(unittest.TestCase):
 
     def test_existing_local_key_migrates_to_vault_with_create_only(self):
         self.install(source="import", pem=self.first)
-        self.settings["vault_enabled"] = True
+        self.enable_vault()
         with patch.object(kumo, "read_shared_dkim_key", return_value=None), patch.object(kumo, "openbao_write") as write:
             self.assertEqual(self.install(source="generate"), "openbao")
-        write.assert_called_once_with(self.settings, "kumomta/dkim/customer.example/s1", self.first, create_only=True)
+        write.assert_called_once()
+        self.assertEqual(write.call_args.args[1:], ("kumomta/dkim/customer.example/s1", self.first))
+        self.assertTrue(write.call_args.kwargs["create_only"])
         self.assertFalse(self.key.exists())
         self.assertEqual(self.pub.read_text().strip(), self.first_public)
 
     def test_generated_keys_converge_on_winner_of_concurrent_vault_create(self):
-        self.settings["vault_enabled"] = True
+        self.enable_vault()
         conflict = kumo.OpenBaoHTTPError(400, "selector")
         # Another peer commits its key between our read and our create-only write.
         with patch.object(kumo, "read_shared_dkim_key", side_effect=[None, self.other]) as read, \
@@ -97,7 +111,7 @@ class ClusterDkimTest(unittest.TestCase):
             write.assert_not_called()
 
     def test_racing_existing_or_explicit_key_is_never_replaced(self):
-        self.settings["vault_enabled"] = True
+        self.enable_vault()
         conflict = kumo.OpenBaoHTTPError(400, "selector")
         for existing in [False, True]:
             with self.subTest(existing=existing):
@@ -121,7 +135,7 @@ class ClusterDkimTest(unittest.TestCase):
         request = send.call_args.args[0]
         self.assertEqual(json.loads(request.data), {"options": {"cas": 0}, "data": {"key": "test-value"}})
         denied = kumo.OpenBaoHTTPError(403, "secret")
-        self.settings["vault_enabled"] = True
+        self.enable_vault()
         with patch.object(kumo, "openbao_read", side_effect=denied), patch.object(kumo, "openbao_write") as write:
             with self.assertRaisesRegex(kumo.DomainError, "openbao_read_failed"):
                 self.install()

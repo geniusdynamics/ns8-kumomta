@@ -30,6 +30,7 @@ import urllib.error
 import urllib.request
 
 import agent
+import openbao_client
 
 # Paths, relative to the state directory (the working directory of the
 # actions and of the systemd units)
@@ -38,7 +39,8 @@ CONFIG_DIR = "kumomta"          # -> /opt/kumomta/etc/policy
 SECRETS_DIR = "secrets"         # -> /opt/kumomta/etc/secrets
 DKIM_DIR = "dkim"               # -> /opt/kumomta/etc/dkim
 TLS_DIR = "tls"                 # -> /opt/kumomta/etc/tls
-OPENBAO_ENV = "openbao.env"     # EnvironmentFile of kumomta.service
+OPENBAO_ENV = "openbao.env"     # pasted VAULT_ADDR and VAULT_TOKEN (0600)
+KUMOD_OPENBAO_ENV = "openbao-kumod.env"  # effective ones, EnvironmentFile of kumomta.service
 API_ENV = "secrets/api.env"     # credentials of the local HTTP API
 RESTART_STAMP = ".init-hash"    # hash of the settings read only at startup
 WARNINGS_FILE = ".configure-warnings.json"  # configure-module output
@@ -111,6 +113,11 @@ DEFAULTS = {
     "vault_mount": "secret",
     "vault_path": "kumomta",
     "vault_key": "",
+    # How the module authenticates to OpenBao: "token" (pasted by the
+    # administrator) or "provisioned" (its own token from the
+    # ns8-openbao instance vault_provider, docs/openbao.md)
+    "vault_auth": "token",
+    "vault_provider": "",
     "metrics_host": "",
     "metrics_allowlist": [],
     # Metrics route reachable from the internet; off limits it to private
@@ -362,6 +369,22 @@ def write_openbao_env(address, token):
     return write_file(OPENBAO_ENV, f"VAULT_ADDR={address}\nVAULT_TOKEN={token}\n", 0o600)
 
 
+def write_kumod_env(settings):
+    """VAULT_ADDR and VAULT_TOKEN of kumod (0600 EnvironmentFile of
+    kumomta.service): those of the effective backend. Return them (for
+    the restart stamp)."""
+    view = vault_view(settings)
+    if view:
+        env = {"VAULT_ADDR": view["env"]["VAULT_ADDR"], "VAULT_TOKEN": view["env"]["VAULT_TOKEN"]}
+        write_file(KUMOD_OPENBAO_ENV, f"VAULT_ADDR={env['VAULT_ADDR']}\nVAULT_TOKEN={env['VAULT_TOKEN']}\n", 0o600)
+        return env
+    try:
+        os.unlink(KUMOD_OPENBAO_ENV)
+    except FileNotFoundError:
+        pass
+    return {}
+
+
 def remove_openbao_env():
     try:
         os.unlink(OPENBAO_ENV)
@@ -587,13 +610,73 @@ def dkim_record(domain, selector):
     }
 
 
-def openbao_secret_path(settings, *parts):
-    base = settings["vault_path"].strip("/")
+def cluster_group(settings):
+    """OpenBao group of the peers sharing a throttle store: lowercase
+    letters, digits and dashes, ending with a letter (ns8-openbao group ID
+    format). "" when standalone."""
+    identity = store_identity(settings)
+    if not identity:
+        return ""
+    slug = re.sub(r"[^a-z0-9]+", "-", identity.lower()).strip("-")
+    return f"kumomta-{slug}"[:57].rstrip("-") + "-peers"
+
+
+def vault_view(settings):
+    """The effective OpenBao backend, or None (local secrets).
+
+    Precedence: the provisioned token (vault_auth "provisioned" and a token
+    issued by ns8-openbao), then the pasted token, then local. The
+    provisioned backend uses ns8-kv/modules/<module id>; with an approved
+    cluster group, "shared" is ns8-kv/groups/<group> and its token."""
+    if not settings["vault_enabled"]:
+        return None
+    if settings.get("vault_auth") == "provisioned":
+        state = openbao_client.load_state()
+        token = openbao_client.read_token()
+        if state.get("address") and token:
+            view = {"source": "provisioned",
+                    "env": {"VAULT_ADDR": state["address"], "VAULT_TOKEN": token},
+                    "mount": state.get("kv_mount") or openbao_client.KV_MOUNT,
+                    "path": state["kv_prefix"], "key": "", "shared": None}
+            group = cluster_group(settings) and openbao_client.granted_group(cluster_group(settings))
+            if group:
+                view["shared"] = {"source": "group", "group_id": group["group_id"],
+                                  "env": {"VAULT_ADDR": state["address"],
+                                          "VAULT_TOKEN": openbao_client.read_group_token(group["group_id"])},
+                                  "mount": view["mount"], "path": group["kv_prefix"], "key": ""}
+            return view
+    env = read_openbao_env()
+    if env.get("VAULT_ADDR") and env.get("VAULT_TOKEN"):
+        return {"source": "token", "env": env, "mount": settings["vault_mount"],
+                "path": settings["vault_path"], "key": settings["vault_key"], "shared": None}
+    return None
+
+
+def vault_on(settings):
+    """True when the secrets of KumoMTA are read from OpenBao"""
+    return vault_view(settings) is not None
+
+
+def shared_target(settings):
+    """Where the secrets shared by cluster peers live: the approved group,
+    the pasted-token path (shared by the instances using the same path), or
+    None (provisioned without a group: peer-to-peer sharing only)"""
+    view = vault_view(settings)
+    if not view:
+        return None
+    if view["shared"]:
+        return view["shared"]
+    return view if view["source"] == "token" else None
+
+
+def openbao_secret_path(settings, *parts, target=None):
+    target = target or vault_view(settings)
+    base = (target["path"] if target else settings["vault_path"]).strip("/")
     return "/".join([p for p in [base] + list(parts) if p])
 
 
-def dkim_vault_path(settings, domain, selector):
-    return openbao_secret_path(settings, "dkim", domain, selector)
+def dkim_vault_path(settings, domain, selector, target=None):
+    return openbao_secret_path(settings, "dkim", domain, selector, target=target)
 
 
 class OpenBaoHTTPError(RuntimeError):
@@ -602,15 +685,30 @@ class OpenBaoHTTPError(RuntimeError):
         self.status = status
 
 
-def openbao_write(settings, path, value, env=None, *, create_only=False):
-    """Write a KV v2 secret: {field: value}. Raises RuntimeError"""
-    env = env if env is not None else read_openbao_env()
-    address = env.get("VAULT_ADDR", "").rstrip("/")
-    token = env.get("VAULT_TOKEN", "")
+def _target(settings, env, target):
+    if target is None:
+        target = vault_view(settings) or {"env": {}, "mount": settings["vault_mount"],
+                                         "key": settings["vault_key"], "source": "token"}
+    if env is not None:
+        target = dict(target, env=env)
+    address = target["env"].get("VAULT_ADDR", "").rstrip("/")
+    token = target["env"].get("VAULT_TOKEN", "")
     if not address or not token:
         raise RuntimeError("OpenBao address or token not set")
-    field = settings["vault_key"] or "key"
-    url = f"{address}/v1/{settings['vault_mount'].strip('/')}/data/{path}"
+    return target, address, token
+
+
+def _http_error(target, code, path):
+    if code == 403 and target.get("source") in ("provisioned", "group"):
+        openbao_client.mark_reprovision()  # the timer provisions again
+    return OpenBaoHTTPError(code, path)
+
+
+def openbao_write(settings, path, value, env=None, *, create_only=False, target=None):
+    """Write a KV v2 secret: {field: value}. Raises RuntimeError"""
+    target, address, token = _target(settings, env, target)
+    field = target["key"] or "key"
+    url = f"{address}/v1/{target['mount'].strip('/')}/data/{path}"
     payload = {"data": {field: value}}
     if create_only:
         payload["options"] = {"cas": 0}
@@ -621,26 +719,22 @@ def openbao_write(settings, path, value, env=None, *, create_only=False):
         with urllib.request.urlopen(req, timeout=10) as resp:
             resp.read()
     except urllib.error.HTTPError as ex:
-        raise OpenBaoHTTPError(ex.code, path) from None
+        raise _http_error(target, ex.code, path) from None
     except (urllib.error.URLError, OSError, ValueError) as ex:
         raise RuntimeError(f"cannot reach OpenBao: {ex}") from None
 
 
-def openbao_read(settings, path, env=None):
+def openbao_read(settings, path, env=None, target=None):
     """Read the field of a KV v2 secret. Raises RuntimeError"""
-    env = env if env is not None else read_openbao_env()
-    address = env.get("VAULT_ADDR", "").rstrip("/")
-    token = env.get("VAULT_TOKEN", "")
-    if not address or not token:
-        raise RuntimeError("OpenBao address or token not set")
-    field = settings["vault_key"] or "key"
-    url = f"{address}/v1/{settings['vault_mount'].strip('/')}/data/{path}"
+    target, address, token = _target(settings, env, target)
+    field = target["key"] or "key"
+    url = f"{address}/v1/{target['mount'].strip('/')}/data/{path}"
     req = urllib.request.Request(url, method="GET", headers={"X-Vault-Token": token})
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
             payload = json.loads(resp.read() or b"{}")
     except urllib.error.HTTPError as ex:
-        raise OpenBaoHTTPError(ex.code, path) from None
+        raise _http_error(target, ex.code, path) from None
     except (urllib.error.URLError, OSError, ValueError) as ex:
         raise RuntimeError(f"cannot reach OpenBao: {ex}") from None
     value = ((payload.get("data") or {}).get("data") or {}).get(field)
@@ -649,10 +743,84 @@ def openbao_read(settings, path, env=None):
     return value
 
 
+def view_signature(view):
+    """What identifies a backend (no token): migration is needed when it changes"""
+    if not view:
+        return None
+    return (view["env"].get("VAULT_ADDR", "").rstrip("/"), view["mount"].strip("/"), view["path"].strip("/"))
+
+
+def provisioned_client_step(settings, previous_view=None, run=None):
+    """Provisioned mode: get or refresh the token of this module, ask for
+    the cluster group, and copy the secrets of the previous backend to the
+    new one when it changed. Return (status, warnings); status is the
+    result of openbao_client.maintain(). Never raises on OpenBao errors:
+    the module keeps working with the pasted token or its local secrets."""
+    warnings = []
+    wanted = bool(settings["vault_enabled"] and settings.get("vault_auth") == "provisioned"
+                  and settings.get("vault_provider"))
+    status = openbao_client.maintain(settings.get("vault_provider") or "", False, run=run, wanted=wanted)
+    if wanted and status in ("provisioned", "reprovisioned") and cluster_group(settings) \
+            and not openbao_client.granted_group(cluster_group(settings)):
+        try:
+            openbao_client.request_access(settings["vault_provider"], False, [cluster_group(settings)], run=run)
+        except openbao_client.ClientError as ex:
+            log(agent.SD_WARNING + f"OpenBao group request not recorded: {ex.code}")
+    if status == "pending":
+        warnings.append({"id": "openbao_client_pending", "items": [settings.get("vault_provider") or ""]})
+    elif status == "dropped":
+        warnings.append({"id": "openbao_client_dropped", "items": []})
+    new_view = vault_view(settings)
+    if previous_view and new_view and view_signature(previous_view) != view_signature(new_view):
+        copied, failed = migrate_vault_secrets(settings, previous_view, new_view)
+        if copied:
+            log(f"Secrets copied to the new OpenBao path: {', '.join(copied)}")
+        if failed:
+            log(agent.SD_WARNING + "Secrets not copied to the new OpenBao path: " + ", ".join(failed))
+            warnings.append({"id": "openbao_migration_incomplete", "items": failed})
+    return status, warnings
+
+
+# Secrets of the OpenBao backend, by name under the base path
+SECRET_NAMES = {"smarthost": "smarthost_password_set", "webhook": "webhook_token_set",
+                "webhook_signing": "webhook_signing_secret_set", "cluster_redis": "cluster_redis_password_set"}
+
+
+def migrate_vault_secrets(settings, source, destination):
+    """Copy the secrets of the module from one OpenBao backend to another,
+    e.g. from the pasted-token path to ns8-kv/modules/<id> when switching to
+    provisioned mode. Values never leave this process. Return (copied,
+    failed) name lists; a secret missing at the source is skipped."""
+    copied, failed = [], []
+    names = [(n, [n]) for n, marker in SECRET_NAMES.items() if settings.get(marker)]
+    names += [(f"{d['selector']}._domainkey.{d['domain']}", ["dkim", d["domain"], d["selector"]])
+              for d in settings["domains"]]
+    for name, parts in names:
+        try:
+            value = openbao_read(settings, openbao_secret_path(settings, *parts, target=source), target=source)
+        except OpenBaoHTTPError as ex:
+            if ex.status == 404:
+                continue
+            failed.append(name)
+            continue
+        except RuntimeError as ex:
+            if "no '" in str(ex):
+                continue
+            failed.append(name)
+            continue
+        try:
+            openbao_write(settings, openbao_secret_path(settings, *parts, target=destination), value,
+                          target=destination)
+            copied.append(name)
+        except RuntimeError:
+            failed.append(name)
+    return copied, failed
+
+
 def vault_only_items(settings):
     """Secrets that exist only in OpenBao: without OpenBao, KumoMTA cannot
     use them. Names and paths only, never the values."""
-    if not settings["vault_enabled"]:
+    if not vault_on(settings):
         return []
     items = []
     for dom in settings["domains"]:
@@ -716,11 +884,12 @@ class DomainError(Exception):
         self.value = value
 
 
-def read_shared_dkim_key(settings, domain, selector):
+def read_shared_dkim_key(settings, domain, selector, target=None):
     """The private key at the OpenBao path of a domain, or None when there
-    is none. Raises RuntimeError when OpenBao cannot answer."""
+    is none. Raises RuntimeError when OpenBao cannot answer. target: the
+    shared store (shared_target()) or, by default, the module backend."""
     try:
-        return openbao_read(settings, dkim_vault_path(settings, domain, selector))
+        return openbao_read(settings, dkim_vault_path(settings, domain, selector, target), target=target)
     except OpenBaoHTTPError as ex:
         if ex.status == 404:
             return None
@@ -742,13 +911,14 @@ def _dkim_public(pem):
         raise DomainError("invalid_private_key") from None
 
 
-def _create_shared_dkim_key(settings, domain, selector, pem):
+def _create_shared_dkim_key(settings, domain, selector, pem, target=None):
     """Return the key committed at this selector, including on a concurrent create."""
     try:
-        openbao_write(settings, dkim_vault_path(settings, domain, selector), pem, create_only=True)
+        openbao_write(settings, dkim_vault_path(settings, domain, selector, target), pem,
+                      create_only=True, target=target)
     except OpenBaoHTTPError as ex:
         if ex.status == 400:  # KV v2 reports a CAS mismatch as HTTP 400
-            winner = read_shared_dkim_key(settings, domain, selector)
+            winner = read_shared_dkim_key(settings, domain, selector, target)
             if winner is not None:
                 return winner
         raise
@@ -762,7 +932,10 @@ def install_dkim_key(settings, domain, selector, pem=None, *, source="domain", r
     cluster = clustered(settings)
     if cluster and rotate:
         raise DomainError("cluster_rotation_refused", domain)
-    vault = settings["vault_enabled"]
+    vault = vault_on(settings)
+    # Shared store of the peers: the pasted-token path or the approved
+    # group; provisioned without a group, keys are shared peer to peer
+    shared_store = shared_target(settings) if cluster else None
     keyfile, pubfile = dkim_paths(domain, selector)
     local = _dkim_file(keyfile)
     published = _dkim_file(pubfile) if cluster else None
@@ -779,9 +952,9 @@ def install_dkim_key(settings, domain, selector, pem=None, *, source="domain", r
         return public
 
     shared = None
-    if vault and (cluster or source != "domain"):
+    if (cluster and shared_store) or (vault and not cluster and source != "domain"):
         try:
-            shared = read_shared_dkim_key(settings, domain, selector)
+            shared = read_shared_dkim_key(settings, domain, selector, shared_store)
         except RuntimeError as ex:
             log(agent.SD_ERR + str(ex))
             raise DomainError("openbao_read_failed", domain) from None
@@ -798,15 +971,18 @@ def install_dkim_key(settings, domain, selector, pem=None, *, source="domain", r
     elif shared is not None:
         candidate = shared
     else:
-        if cluster and (published is not None or (not vault and source != "generate")):
+        if cluster and (published is not None or (not shared_store and source != "generate")):
             raise DomainError("cluster_key_required", domain)
         candidate, _ = generate_dkim_key()
 
     public = check_fingerprint(candidate)
     if vault:
-        if cluster and shared is None:
-            committed = _create_shared_dkim_key(settings, domain, selector, candidate)
-            public = check_fingerprint(committed)
+        if cluster and shared_store and shared is None:
+            candidate = _create_shared_dkim_key(settings, domain, selector, candidate, shared_store)
+            public = check_fingerprint(candidate)
+        if cluster and (shared_store is None or shared_store.get("source") == "group"):
+            # kumod reads the module path only: keep a copy of the shared key there
+            openbao_write(settings, dkim_vault_path(settings, domain, selector), candidate)
         elif not cluster and (shared is None or _dkim_public(shared) != public):
             openbao_write(settings, dkim_vault_path(settings, domain, selector), candidate)
     else:
@@ -832,7 +1008,7 @@ def remove_dkim_files(domain, selector):
 
 def key_location(settings, dom):
     keyfile, pubfile = dkim_paths(dom["domain"], dom["selector"])
-    if settings["vault_enabled"]:
+    if vault_on(settings):
         if os.path.exists(keyfile):
             return "local_not_in_openbao"
         return "openbao" if os.path.exists(pubfile) else "missing"
@@ -1201,8 +1377,16 @@ def store_identity(settings):
 def store_password(settings):
     """Password of the store: a local 0600 file, or OpenBao for a manual
     store while OpenBao is on. "" when unknown."""
-    if settings["cluster_store"] == "manual" and settings["vault_enabled"] and not read_secret(CLUSTER_PASSWORD):
+    if settings["cluster_store"] == "manual" and vault_on(settings) and not read_secret(CLUSTER_PASSWORD):
         try:
+            target = shared_target(settings)
+            if target and target.get("source") == "group":
+                try:
+                    return openbao_read(settings, openbao_secret_path(settings, "cluster_redis", target=target),
+                                        target=target)
+                except OpenBaoHTTPError as ex:
+                    if ex.status != 404:
+                        raise
             return openbao_read(settings, openbao_secret_path(settings, "cluster_redis"))
         except RuntimeError as ex:
             log(agent.SD_WARNING + f"Cannot read the throttle store password from OpenBao: {ex}")
@@ -1522,6 +1706,11 @@ def apply_cluster_services(settings, state):
         systemctl("enable", "--now", "kumomta-cluster-check.timer")
     elif _unit_in_use("kumomta-cluster-check.timer"):
         systemctl("disable", "--now", "kumomta-cluster-check.timer")
+    # Renewal and provisioning of the OpenBao client token (provisioned mode)
+    if settings["vault_enabled"] and settings.get("vault_auth") == "provisioned":
+        systemctl("enable", "--now", "kumomta-openbao-client.timer")
+    elif _unit_in_use("kumomta-openbao-client.timer"):
+        systemctl("disable", "--now", "kumomta-openbao-client.timer")
 
 
 def _file_digest(path):
@@ -1681,13 +1870,14 @@ def sending_ip_files(settings):
 def keysource(settings, name, local_file):
     """A KumoMTA KeySource: a vault block when OpenBao is enabled, else a
     file under the secrets directory"""
-    if settings["vault_enabled"]:
+    view = vault_view(settings)
+    if view:
         block = {
-            "vault_mount": settings["vault_mount"],
-            "vault_path": openbao_secret_path(settings, name),
+            "vault_mount": view["mount"],
+            "vault_path": openbao_secret_path(settings, name, target=view),
         }
-        if settings["vault_key"]:
-            block["vault_key"] = settings["vault_key"]
+        if view["key"]:
+            block["vault_key"] = view["key"]
         return block
     return f"{C_SECRETS}/{local_file}"
 
@@ -1793,7 +1983,7 @@ def render(settings, template_path=None):
         # Password of the throttle store: a local 0600 file; for a manual
         # store with OpenBao on, the shared secret <path>/cluster_redis
         if settings["cluster_store"] == "manual" and not read_secret(CLUSTER_PASSWORD) \
-                and settings["vault_enabled"] and settings["cluster_redis_password_set"]:
+                and vault_on(settings) and settings["cluster_redis_password_set"]:
             keys["cluster_redis_password"] = keysource(settings, "cluster_redis", CLUSTER_PASSWORD)
         elif read_secret(CLUSTER_PASSWORD):
             keys["cluster_redis_password"] = f"{C_SECRETS}/{CLUSTER_PASSWORD}"
@@ -1852,11 +2042,12 @@ def render(settings, template_path=None):
     # DKIM signing data (format of policy-extras.dkim_sign, plus vault_key)
     base = {"headers": ["From", "To", "Subject", "Date", "MIME-Version", "Content-Type",
                         "Message-ID", "Reply-To", "Cc", "List-Unsubscribe"]}
-    if settings["vault_enabled"]:
-        base["vault_mount"] = settings["vault_mount"]
-        base["vault_path_prefix"] = openbao_secret_path(settings, "dkim")
-        if settings["vault_key"]:
-            base["vault_key"] = settings["vault_key"]
+    view = vault_view(settings)
+    if view:
+        base["vault_mount"] = view["mount"]
+        base["vault_path_prefix"] = openbao_secret_path(settings, "dkim", target=view)
+        if view["key"]:
+            base["vault_key"] = view["key"]
     dkim_domains = {}
     for dom in settings["domains"]:
         entry = {
@@ -1865,7 +2056,7 @@ def render(settings, template_path=None):
             "tenant": dom.get("tenant") or "",
             "verified": (dom.get("status") == "verified"),
         }
-        if not settings["vault_enabled"]:
+        if not view:
             entry["filename"] = f"{C_DKIM}/{dom['domain']}/{dom['selector']}.key"
         dkim_domains[dom["domain"]] = entry
     files["dkim_data.toml"] = toml_dumps({"base": base, "domain": dkim_domains}, header=head)
@@ -1943,7 +2134,7 @@ def write_config(settings, template_path=None, stamp=True):
     # Settings read only at startup, the environment of kumod included
     stamped = {
         "init": init_settings(settings),
-        "openbao": read_openbao_env() if settings["vault_enabled"] else {},
+        "openbao": write_kumod_env(settings),
     }
     # KumoMTA caches resolved pools and sources separately from the policy
     # epoch. Restart when explicit sources change so existing queues cannot

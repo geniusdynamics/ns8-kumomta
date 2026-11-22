@@ -1,0 +1,45 @@
+#!/usr/bin/env python3
+
+#
+# Copyright (C) 2026 Genius Dynamics
+# SPDX-License-Identifier: GPL-3.0-or-later
+#
+
+# Status of the OpenBao client provisioning of this module (reader-safe:
+# no secret). "status" comes from get-client-status of the ns8-openbao
+# instance: none, pending, approved or stale; "client" is the local state
+# of the provisioned token (never the token itself).
+
+import json
+import sys
+import agent
+import kumomta_ns8 as kumo
+from openbao_client import ClientError, get_status, public_state
+
+data = json.load(sys.stdin)
+settings = kumo.load_settings()
+provider = data.get("openbao_module_id") or settings.get("vault_provider") or ""
+view = kumo.vault_view(settings)
+out = {
+    "openbao_module_id": provider,
+    "status": "none",
+    "client_provisioning": False,
+    "ready": False,
+    "database_engine": False,
+    "groups": [],
+    "groups_requested": [],
+    "group": kumo.cluster_group(settings),
+    "error": "",
+    "client": public_state(),
+    "vault_effective": view["source"] if view else "local",
+}
+if provider:
+    try:
+        remote = get_status(provider)
+        for key in ("status", "client_provisioning", "ready", "database_engine", "groups", "groups_requested"):
+            if key in remote:
+                out[key] = remote[key]
+    except ClientError as ex:
+        print(agent.SD_WARNING + f"get-client-status of {provider} failed: {ex.code}", file=sys.stderr)
+        out["error"] = ex.code
+json.dump(out, fp=sys.stdout)

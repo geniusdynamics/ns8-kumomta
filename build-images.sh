@@ -57,7 +57,7 @@ buildah add "${container}" ui/dist /ui
 #   valkey@any:valkeyclient gets client credentials from ns8-valkey
 #   (grant-client)
 buildah config --entrypoint=/ \
-    --label="org.nethserver.authorizations=traefik@node:fulladm node:fwadm,portsadm kumomta@any:clusterpeer valkey@any:valkeyclient" \
+    --label="org.nethserver.authorizations=traefik@node:fulladm node:fwadm,portsadm kumomta@any:clusterpeer valkey@any:valkeyclient openbao@any:secretsclient" \
     --label="org.nethserver.tcp-ports-demand=3" \
     --label="org.nethserver.rootfull=0" \
     --label="org.nethserver.min-core=3.20.1" \

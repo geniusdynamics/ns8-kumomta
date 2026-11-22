@@ -596,6 +596,33 @@ Check if the OpenBao-only secrets can be copied back to local
     Should Be Equal    ${output}    active
     [Teardown]    Execute Command    systemctl stop kumomta-ci-openbao
 
+Check if the OpenBao client status needs no provider
+    ${status} =    Run action    get-openbao-client-status
+    Should Be Equal    ${status}[status]    none
+    Should Not Be True    ${status}[client][active]
+    ${output}  ${rc} =    Execute Command    api-cli run module/${module_id}/request-openbao-access --data '{}'
+    ...    return_rc=True
+    Should Not Be Equal As Integers    ${rc}  0
+    Should Contain    ${output}    required
+
+Check if provisioned mode works against a fake ns8-openbao
+    Execute Command    mkdir -p /tmp/kumo-obc && chmod 755 /tmp/kumo-obc
+    Put File    ${CURDIR}/fake_bao_api.py    /tmp/kumo-obc/fake_bao_api.py    mode=0644
+    Put File    ${CURDIR}/openbao_client_flow.py    /tmp/kumo-obc/openbao_client_flow.py    mode=0644
+    ${out}  ${err}  ${rc} =    Execute Command    runagent -m ${module_id} python3 /tmp/kumo-obc/openbao_client_flow.py
+    ...    return_rc=True    return_stderr=True
+    Should Be Equal As Integers    ${rc}    0    ${err}
+    ${r} =    Evaluate    json.loads($out)    modules=json
+    Should Be Equal    ${r}[first]    pending
+    Should Be Equal    ${r}[approved]    provisioned
+    Should Be Equal    ${r}[source]    provisioned
+    Should Be Equal    ${r}[path]    modules/${module_id}
+    Should Be True    ${r}[token_hidden]
+    Should Be Equal    ${r}[dir_mode]    0o700
+    Should Be Equal    ${r}[revoked]    dropped
+    Should Be True    ${r}[fallback_local]
+    [Teardown]    Execute Command    rm -rf /tmp/kumo-obc
+
 Check if kumomta is removed correctly
     ${rc} =    Execute Command    remove-module --no-preserve ${module_id}
     ...    return_rc=True  return_stdout=False

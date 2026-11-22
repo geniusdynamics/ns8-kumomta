@@ -41,7 +41,7 @@ with authorized_peer() as peer:
     if os.path.exists(keyfile):
         with open(keyfile) as fp:
             pem = fp.read()
-    elif settings["vault_enabled"]:
+    elif kumo.vault_on(settings):
         try:
             pem = kumo.read_shared_dkim_key(settings, domain, selector)
         except RuntimeError as ex:

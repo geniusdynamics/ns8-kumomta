@@ -1,2 +1,6 @@
 # Each source instance approves its own peers.
 - /state/peer-access/
+# The provisioned OpenBao token is bound to this module ID: a clone asks
+# for its own (docs/openbao.md)
+- /state/openbao-client/
+- /state/openbao-kumod.env

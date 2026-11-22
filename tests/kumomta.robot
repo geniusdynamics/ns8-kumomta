@@ -242,7 +242,7 @@ Check if the metrics route asks for the metrics user
     ${config} =    Get configuration
     Should Not Be True    ${config}[metrics_public]
     ${output} =    Wait Until Keyword Succeeds    1 min    5 sec    Metrics answer    ${EMPTY}    401
-    Should Contain    ${output}    www-authenticate: Basic
+    Should Contain    ${output}    www-authenticate: basic realm=
     Wait Until Keyword Succeeds    1 min    5 sec    Metrics answer    metrics:${METRICS_PASS}    200
     ${result} =    Configure    {"metrics_public":true}
     Wait Until Keyword Succeeds    1 min    5 sec    Metrics answer    metrics:${METRICS_PASS}    200

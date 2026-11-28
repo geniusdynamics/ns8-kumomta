@@ -16,6 +16,7 @@ import re
 import socket
 import subprocess
 import sys
+from urllib.parse import urlsplit
 import agent
 import kumomta_ns8 as kumo
 
@@ -197,6 +198,28 @@ for dom in data.get("domains", []):
         error("domains", dom["domain"], "domain_exists")
     if not kumo.TENANT_RE.match(dom.get("tenant") or ""):
         error("domains", dom.get("tenant"), "invalid_tenant")
+
+for field, value, code in kumo.submission_guard_errors(settings):
+    error(field, value, code)
+for field, schemes, secret in (
+    ("suppression_url", ("https",), "suppression_token"),
+    ("rspamd_url", ("http", "https"), "rspamd_password"),
+):
+    value = settings[field]
+    if value:
+        try:
+            url = urlsplit(value)
+            valid = (url.scheme in schemes and url.hostname and url.port != 0
+                     and url.username is None and url.password is None
+                     and not url.fragment and not url.query
+                     and not any(c.isspace() or c == "\\" for c in value))
+        except ValueError:
+            valid = False
+        if not valid:
+            error(field, "", "invalid_url")
+    if value and secret == "suppression_token":
+        if data.get(secret + "_clear") or not (data.get(secret) or kumo.read_secret(secret)):
+            error(secret, "", "token_required")
 
 # Integration credentials of the sending platforms
 known_integrations = kumo.read_integrations_secrets()

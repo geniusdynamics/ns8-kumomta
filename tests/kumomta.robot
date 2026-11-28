@@ -475,6 +475,38 @@ Check if a multi-tenant credential takes the tenant from X-Tenant
     [Teardown]    Run Keywords    API call    DELETE    /api/v1/domains/${API_DOMAIN}    ${INT_USER}    ${INT_PASS}
     ...    AND    Configure    {"integrations":[{"name":"${INT_USER}","tenant":"ci-tenant","scopes":["inject","domains"],"max_message_rate":"1000/min"}],"require_verified_domains":true}
 
+Guarded submission shares a recipient cap and handles scanner decisions
+    Put File    ${CURDIR}/fake_rspamd.py    /root/kumomta_fake_rspamd.py
+    Execute Command    systemd-run --unit=kumomta-ci-rspamd python3 /root/kumomta_fake_rspamd.py 18312
+    Configure    {"sink_enabled":true,"require_verified_domains":false,"integrations":[{"name":"${INT_USER}","tenant":"","tenant_prefix":"ci-","scopes":["inject","smtp","domains"]}],"guarded_integrations":["${INT_USER}"],"tenant_policies":{"ci-cap":{"admission_per_hour":2},"ci-hold":{"admission_per_hour":20,"paused":true},"ci-scan":{"admission_per_hour":20}},"rspamd_url":"http://127.0.0.1:18312/checkv2","rspamd_password":"ci-only-rspamd-password"}
+    ${config} =    Get configuration
+    Should Be True    ${config}[rspamd_password_set]
+    Dictionary Should Not Contain Key    ${config}    rspamd_password
+    ${result} =    Inject with tenant    guard-unknown@example.net    ci-missing    ${TEST_DOMAIN}
+    Should Be Equal As Integers    ${result}[fail_count]    1
+    Should Contain    ${result}[errors][0]    configured tenant policy
+    ${result} =    Inject with tenant    guard-paused@example.net    ci-hold    ${TEST_DOMAIN}
+    Should Be Equal As Integers    ${result}[fail_count]    1
+    Should Contain    ${result}[errors][0]    tenant sending is paused
+    ${output}    ${rc} =    Execute Command
+    ...    python3 ${CHECK} submit 127.0.0.1 587 ${INT_USER} '${INT_PASS}' ci@${TEST_DOMAIN} guard-smtp@example.net ci-cap
+    ...    return_rc=True
+    Should Be Equal As Integers    ${rc}    0    ${output}
+    ${result} =    Inject with tenant    guard-http@example.net    ci-cap    ${TEST_DOMAIN}
+    Should Be Equal As Integers    ${result}[success_count]    1
+    ${result} =    Inject with tenant    guard-exhausted@example.net    ci-cap    ${TEST_DOMAIN}
+    Should Be Equal As Integers    ${result}[fail_count]    1
+    Should Contain    ${result}[errors][0]    tenant admission limit reached
+    ${result} =    Inject with tenant    guard-scan-reject@example.net    ci-scan    ${TEST_DOMAIN}
+    Should Be Equal As Integers    ${result}[fail_count]    1
+    Should Contain    ${result}[errors][0]    rejected by outbound content policy
+    Execute Command    systemctl stop kumomta-ci-rspamd
+    ${result} =    Inject with tenant    guard-scanner-down@example.net    ci-scan    ${TEST_DOMAIN}
+    Should Be Equal As Integers    ${result}[fail_count]    1
+    Should Contain    ${result}[errors][0]    outbound content check deferred
+    [Teardown]    Run Keywords    Execute Command    systemctl stop kumomta-ci-rspamd
+    ...    AND    Configure    {"tenant_policies":{},"guarded_integrations":[],"rspamd_url":"","rspamd_password_clear":true,"integrations":[{"name":"${INT_USER}","tenant":"ci-tenant","scopes":["inject","domains"],"max_message_rate":"1000/min"}],"require_verified_domains":true}
+
 Check if sink mode can be turned off
     ${result} =    Configure    {"sink_enabled":false}
     ${ids} =    Warning ids    ${result}

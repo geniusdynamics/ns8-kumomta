@@ -7,7 +7,7 @@
 
 # SMTP checks run on the test node:
 #   smtp_check.py banner HOST PORT
-#   smtp_check.py submit HOST PORT USER PASSWORD FROM TO
+#   smtp_check.py submit HOST PORT USER PASSWORD FROM TO [TENANT]
 #   smtp_check.py badauth HOST PORT USER
 #   smtp_check.py relay HOST PORT FROM TO     (expects relaying denied)
 #   smtp_check.py rcpt HOST PORT FROM TO [SOURCE_IP]
@@ -33,7 +33,8 @@ if cmd == "banner":
 
 if cmd == "submit":
     user, password, mfrom, rcpt = sys.argv[4:8]
-    msg = (f"From: {mfrom}\r\nTo: {rcpt}\r\nSubject: ns8-kumomta CI\r\n"
+    tenant_header = f"X-Tenant: {sys.argv[8]}\r\n" if len(sys.argv) > 8 else ""
+    msg = (f"From: {mfrom}\r\nTo: {rcpt}\r\n{tenant_header}Subject: ns8-kumomta CI\r\n"
            f"Message-ID: <ci-{port}@ns8-ci.test>\r\n\r\nTest message\r\n")
     with smtplib.SMTP(host, port, timeout=30) as smtp:
         smtp.ehlo("ci.ns8-ci.test")

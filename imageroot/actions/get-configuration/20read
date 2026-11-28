@@ -31,6 +31,8 @@ config["vault_effective"] = view["source"] if view else "local"
 config["openbao_client"] = dict(kumo.openbao_client.public_state(), group=kumo.cluster_group(settings))
 config["webhook_signing_secret_set"] = bool(settings["webhook_signing_secret_set"])
 config["cluster_redis_password_set"] = bool(settings["cluster_redis_password_set"])
+for secret in ("suppression_token", "rspamd_password"):
+    config[secret + "_set"] = bool(kumo.read_secret(secret))
 hashes = kumo.read_integrations_secrets()
 owned = {}
 for dom in settings["domains"]:

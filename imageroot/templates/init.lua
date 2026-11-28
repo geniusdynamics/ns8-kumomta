@@ -163,9 +163,111 @@ local function apply_integration_policy(msg, name, integ)
     end
   end
   if tenant and tenant ~= '' then
+    if not integration_tenant_allowed(integ, tenant) then
+      kumo.reject(550, '5.7.1 tenant is not allowed for this credential')
+    end
     msg:set_meta('tenant', tenant)
   end
   msg:set_meta('ns8_integration', name)
+  return tenant
+end
+
+local guard_client = kumo.http.build_client { timeout = '3 seconds' }
+
+local function suppression_status(cfg, tenant, integration, recipients)
+  local token = kumo.secrets.load(SECRETS .. '/suppression_token')
+  return guard_client:post(cfg.suppression_url)
+    :header('Content-Type', 'application/json')
+    :header('Authorization', 'Bearer ' .. token)
+    :body(kumo.serde.json_encode {
+      tenant = tenant, integration = integration, recipients = recipients,
+    }):send():status_code()
+end
+
+local function scan_action(cfg, msg)
+  local request = guard_client:post(cfg.rspamd_url)
+    :header('Content-Type', 'application/octet-stream')
+    :body(msg:get_data())
+  if cfg.rspamd_password then
+    request = request:header('Password', kumo.secrets.load(SECRETS .. '/rspamd_password'))
+  end
+  local response = request:send()
+  if response:status_code() ~= 200 then
+    return nil
+  end
+  local result = kumo.serde.json_parse(response:text())
+  if type(result) == 'table' and not result.is_skipped then
+    return result.action
+  end
+  return nil
+end
+
+local function apply_submission_guard(msg, tenant, integration)
+  local cfg = policy_data('submission-guard.toml')
+  if cfg.version ~= 1 then
+    kumo.reject(451, '4.7.1 tenant policy is unavailable')
+  end
+  local rule = tenant and (cfg.tenant or {})[tenant]
+  if not rule then
+    if (cfg.guarded_integrations or {})[integration] then
+      kumo.reject(550, '5.7.1 a configured tenant policy is required')
+    end
+    return false
+  end
+  if rule.paused then
+    kumo.reject(451, '4.7.1 tenant sending is paused')
+  end
+  if cfg.clustered and not INIT.redis then
+    kumo.reject(451, '4.7.1 shared tenant admission limits are unavailable')
+  end
+
+  local recipients = {}
+  for _, address in ipairs(msg:recipient_list()) do
+    recipients[#recipients + 1] = address.email
+  end
+  if #recipients == 0 then
+    kumo.reject(451, '4.7.1 missing envelope recipients')
+  end
+
+  -- Charge the admission budget before external checks. Rejected recipients
+  -- also consume capacity, so repeated rejected requests cannot bypass it.
+  local ok, allowed = pcall(function()
+    local throttle = kumo.make_throttle('ns8-admission-' .. tenant, rule.admission_per_hour .. '/h')
+    for _ = 1, #recipients do
+      if throttle:throttle().throttled then
+        return false
+      end
+    end
+    return true
+  end)
+  if not ok then
+    kumo.reject(451, '4.7.1 tenant admission limits are unavailable')
+  end
+  if not allowed then
+    kumo.reject(451, '4.7.1 tenant admission limit reached')
+  end
+
+  if cfg.suppression_url and cfg.suppression_url ~= '' then
+    ok, allowed = pcall(suppression_status, cfg, tenant, integration, recipients)
+    if ok and allowed == 403 then
+      kumo.reject(550, '5.7.1 recipient blocked by suppression policy')
+    end
+    if not ok or allowed ~= 204 then
+      kumo.reject(451, '4.7.1 suppression check unavailable')
+    end
+  end
+  if cfg.rspamd_url and cfg.rspamd_url ~= '' then
+    local scanned, action = pcall(scan_action, cfg, msg)
+    if scanned and action == 'reject' then
+      kumo.reject(550, '5.7.1 rejected by outbound content policy')
+    end
+    -- Keep the submitted content intact. Rspamd header or subject rewrites,
+    -- challenges and unknown actions require an operator to handle the policy.
+    if not scanned or (action ~= 'no action' and action ~= 'accept') then
+      kumo.reject(451, '4.7.1 outbound content check deferred')
+    end
+  end
+  return true
 end
 
 -- X-Tenant and X-Campaign headers select the tenant and campaign of the
@@ -414,7 +516,7 @@ kumo.on('get_listener_domain', function(domain, listener, conn_meta)
 end)
 
 -- DKIM signing of the messages of trusted clients
-local function dkim_sign(msg)
+local function dkim_sign(msg, required)
   local data = policy_data('dkim_data.toml')
   local from = msg:from_header()
   if not from or not data.domain then
@@ -453,8 +555,10 @@ local function dkim_sign(msg)
     msg:dkim_sign(signer)
   end)
   if not ok then
-    -- Deliver unsigned rather than losing the message
     kumo.log_error(string.format('ns8: DKIM signing for %s failed: %s', domain, err))
+    if required then
+      kumo.reject(451, '4.7.1 DKIM signing unavailable')
+    end
   end
 end
 
@@ -463,27 +567,31 @@ kumo.on('smtp_server_message_received', function(msg)
     import_tenant_campaign(msg)
     local authz = msg:get_meta 'authz_id'
     local users = load_toml(SECRETS .. '/smtp_users.toml').user or {}
+    local guarded = false
     if authz and not users[authz] then
       local integ = integration_allows(authz, 'smtp')
       if integ then
-        apply_integration_policy(msg, authz, integ)
+        local tenant = apply_integration_policy(msg, authz, integ)
+        guarded = apply_submission_guard(msg, tenant, authz)
       end
     end
-    dkim_sign(msg)
+    dkim_sign(msg, guarded)
   end
 end)
 
 kumo.on('http_message_generated', function(msg)
   import_tenant_campaign(msg)
   local user = msg:get_meta 'http_auth'
+  local guarded = false
   if user and user ~= 'ns8-admin' then
     local integ = integration_allows(user, 'inject')
     if not integ then
       kumo.reject(550, '5.7.1 not authorized to inject')
     end
-    apply_integration_policy(msg, user, integ)
+    local tenant = apply_integration_policy(msg, user, integ)
+    guarded = apply_submission_guard(msg, tenant, user)
   end
-  dkim_sign(msg)
+  dkim_sign(msg, guarded)
 end)
 
 -- Sending rate of the integrations (max_message_rate): the messages wait
@@ -569,6 +677,17 @@ kumo.on('get_queue_config', function(domain, tenant, campaign, routing_domain)
     max_age = default.max_age,
     refresh_strategy = 'Epoch',
   }
+  if tenant and tenant ~= '' then
+    local cfg = policy_data('submission-guard.toml')
+    local rule = (cfg.tenant or {})[tenant]
+    if cfg.version ~= 1 or (rule and rule.paused) then
+      params.egress_pool = 'ns8-paused'
+      return kumo.make_queue_config(params)
+    end
+    if rule then
+      params.egress_pool = rule.pool or params.egress_pool
+    end
+  end
   if (q.sink or {}).enabled then
     params.protocol = { custom_lua = { constructor = 'ns8_sink' } }
     return kumo.make_queue_config(params)

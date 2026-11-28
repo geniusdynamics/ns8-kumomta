@@ -128,6 +128,11 @@ DEFAULTS = {
     # Sending platforms: integration credentials (hashes in secrets),
     # HTTPS API host name, sending domain policy
     "integrations": [],               # [{name, tenant, tenant_prefix, scopes, max_message_rate, max_domains}]
+    "tenant_policies": {},
+    "guarded_integrations": [],
+    "sandbox_ips": [],
+    "suppression_url": "",
+    "rspamd_url": "",
     "api_host": "",
     "api_allowlist": [],
     "require_verified_domains": True,
@@ -198,6 +203,47 @@ def integration_tenant_allowed(integ, tenant):
     if fixed:
         return tenant == fixed
     return tenant.startswith(integ.get("tenant_prefix") or "")
+
+
+def sending_pool_members(settings, sources):
+    """Keep sandbox IPs out of the default pool."""
+    sandbox = {source_name(settings, ip) for ip in settings["sandbox_ips"]}
+    pools = {"default": {name: entry for name, entry in sources.items() if name not in sandbox},
+             "ns8-paused": {}}
+    if sandbox:
+        pools["sandbox"] = {name: entry for name, entry in sources.items() if name in sandbox}
+    return pools
+
+
+def submission_guard_errors(settings):
+    """Check relationships across both new and existing settings."""
+    integrations = {entry["name"]: entry for entry in settings["integrations"]}
+    for name in settings["guarded_integrations"]:
+        entry = integrations.get(name)
+        if not entry or not set(entry.get("scopes", ())) & {"inject", "smtp"}:
+            yield "guarded_integrations", name, "submission_integration_required"
+        elif not (entry.get("tenant") or entry.get("tenant_prefix")):
+            yield "guarded_integrations", name, "tenant_or_prefix_required"
+
+    sandbox = set(settings["sandbox_ips"])
+    addresses = {(ip.get("address") or "").strip() for ip in settings["sending_ips"]}
+    if sandbox:
+        if "" in addresses or not sandbox < addresses:
+            yield "sandbox_ips", "", "sandbox_requires_separate_explicit_ips"
+        if settings["smarthost_enabled"]:
+            yield "sandbox_ips", "", "sandbox_requires_direct_delivery"
+        # Reject alternate textual spellings of the same address across pools.
+        try:
+            canonical = {ipaddress.ip_address(ip) for ip in addresses}
+        except ValueError:
+            pass  # sending_ips validation reports malformed addresses
+        else:
+            if len(canonical) != len(addresses):
+                yield "sandbox_ips", "", "sandbox_requires_unique_addresses"
+    if not sandbox:
+        for tenant, policy in settings["tenant_policies"].items():
+            if policy.get("pool") == "sandbox":
+                yield "tenant_policies", tenant, "sandbox_ips_required"
 
 
 def log(message):
@@ -2034,14 +2080,14 @@ def render(settings, template_path=None):
     ip_sources, ip_pool, ip_overall, ip_providers, ip_domains = sending_ip_files(settings)
     files["sources.toml"] = toml_dumps({
         "source": ip_sources,
-        "pool": {"default": ip_pool},
+        "pool": sending_pool_members(settings, ip_pool),
     }, header=head)
     # Overall limits of each sending IP, added by get_egress_path_config
     files["ip_limits.toml"] = toml_dumps({"source": ip_overall}, header=head + "\nOverall limits of each sending IP (egress source), all destinations together.")
 
     # DKIM signing data (format of policy-extras.dkim_sign, plus vault_key)
     base = {"headers": ["From", "To", "Subject", "Date", "MIME-Version", "Content-Type",
-                        "Message-ID", "Reply-To", "Cc", "List-Unsubscribe"]}
+                        "Message-ID", "Reply-To", "Cc", "List-Unsubscribe", "List-Unsubscribe-Post"]}
     view = vault_view(settings)
     if view:
         base["vault_mount"] = view["mount"]
@@ -2112,6 +2158,15 @@ def render(settings, template_path=None):
         "signing": bool(settings.get("webhook_signing_secret_set")),
     }, header=head)
 
+    files["submission-guard.toml"] = toml_dumps({
+        "version": 1,
+        "clustered": clustered(settings),
+        "guarded_integrations": {name: True for name in settings["guarded_integrations"]},
+        "tenant": settings["tenant_policies"],
+        "suppression_url": settings["suppression_url"],
+        "rspamd_url": settings["rspamd_url"],
+        "rspamd_password": bool(read_secret("rspamd_password")),
+    }, header=head)
     # Sending platforms: domain policy of the integration credentials,
     # return path / bounce / feedback domain
     managed = sorted(d["domain"] for d in settings["domains"])
@@ -2141,6 +2196,15 @@ def write_config(settings, template_path=None, stamp=True):
     # keep selecting a removed address. Rate limits are in other files.
     if settings["sending_ips"]:
         stamped["sources"] = files["sources.toml"]
+    # Restart for route or pause changes to return ready mail to the spool.
+    # Cap and endpoint edits are applied by the normal policy epoch reload.
+    routes = {
+        name: "ns8-paused" if policy.get("paused") else policy["pool"]
+        for name, policy in settings["tenant_policies"].items()
+        if policy.get("paused") or policy.get("pool", "default") != "default"
+    }
+    if routes:
+        stamped["tenant_routes"] = routes
     if clustered(settings):
         # KUMO_NODE_ID of the environment follows the cluster mode, and
         # kumod reads the store password in its init event only
@@ -2203,8 +2267,9 @@ def configure_payload(settings):
     data = {k: v for k, v in settings.items() if k in DEFAULTS and not k.endswith("_set")}
     data["lets_encrypt"] = False
     data["smtp_users"] = [{"username": name} for name in sorted(read_smtp_users())]
-    data["domains"] = [{"domain": d["domain"], "selector": d["selector"]}
+    data["domains"] = [{"domain": d["domain"], "selector": d["selector"], "tenant": d.get("tenant", "")}
                        for d in settings["domains"] if not d.get("owner")]
-    data["integrations"] = [{k: i.get(k) for k in ("name", "tenant", "scopes", "max_message_rate")}
+    integration_fields = ("name", "tenant", "tenant_prefix", "scopes", "max_message_rate", "max_domains")
+    data["integrations"] = [{key: i[key] for key in integration_fields if key in i}
                             for i in settings["integrations"]]
     return data

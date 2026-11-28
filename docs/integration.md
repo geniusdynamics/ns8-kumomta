@@ -10,6 +10,9 @@ their own sending domains. This page is the overview; the details are in:
 - [sink-mode.md](sink-mode.md): end-to-end tests without delivering mail
 - [openbao.md](openbao.md): keeping DKIM keys in OpenBao or Vault
 
+Configure [submission guardrails](submission-guardrails.md) for customer
+traffic and review the [sending platform responsibilities](platform-responsibilities.md).
+
 ## Building blocks
 
 ```

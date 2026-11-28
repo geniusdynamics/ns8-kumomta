@@ -39,6 +39,10 @@ its administration interface.
 
 ## Documentation
 
+Configure [submission guardrails](docs/submission-guardrails.md) for customer
+traffic and review the [sending platform responsibilities](docs/platform-responsibilities.md).
+
+
 - [docs/integration.md](docs/integration.md): integrating a sending
   platform: SMTP or HTTP injection, credentials, tenants and campaigns
 - [docs/domains-and-dkim.md](docs/domains-and-dkim.md): sending domains,

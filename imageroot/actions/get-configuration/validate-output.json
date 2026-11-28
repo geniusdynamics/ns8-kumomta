@@ -337,8 +337,19 @@
             "pattern": "^[A-Za-z0-9._-]{0,128}$",
             "description": "Field name of the secrets, empty for the KumoMTA default 'key'"
         },
-        "vault_auth": {"type": "string", "enum": ["token", "provisioned"], "description": "token: the pasted VAULT_TOKEN; provisioned: the module's own token issued by an ns8-openbao instance (client provisioning)"},
-        "vault_provider": {"type": "string", "pattern": "^([a-z][a-z0-9-]{0,62}[0-9])?$", "description": "Module ID of the ns8-openbao instance of provisioned mode, e.g. openbao1"},
+        "vault_auth": {
+            "type": "string",
+            "enum": [
+                "token",
+                "provisioned"
+            ],
+            "description": "token: the pasted VAULT_TOKEN; provisioned: the module's own token issued by an ns8-openbao instance (client provisioning)"
+        },
+        "vault_provider": {
+            "type": "string",
+            "pattern": "^([a-z][a-z0-9-]{0,62}[0-9])?$",
+            "description": "Module ID of the ns8-openbao instance of provisioned mode, e.g. openbao1"
+        },
         "metrics_host": {
             "type": "string"
         },
@@ -365,8 +376,19 @@
         "vault_token_set": {
             "type": "boolean"
         },
-        "vault_effective": {"type": "string", "enum": ["provisioned", "token", "local"], "description": "Backend in use: provisioned token, then pasted token, then local"},
-        "openbao_client": {"type": "object", "description": "Provisioned client state, no secrets"},
+        "vault_effective": {
+            "type": "string",
+            "enum": [
+                "provisioned",
+                "token",
+                "local"
+            ],
+            "description": "Backend in use: provisioned token, then pasted token, then local"
+        },
+        "openbao_client": {
+            "type": "object",
+            "description": "Provisioned client state, no secrets"
+        },
         "cluster_relay_active": {
             "type": "boolean"
         },
@@ -606,6 +628,73 @@
                     "label"
                 ]
             }
+        },
+        "tenant_policies": {
+            "type": "object",
+            "description": "Per-tenant admission and egress policy, keyed by the exact tenant label.",
+            "propertyNames": {
+                "pattern": "^[A-Za-z0-9._-]{1,64}$"
+            },
+            "additionalProperties": {
+                "type": "object",
+                "required": [
+                    "admission_per_hour"
+                ],
+                "additionalProperties": false,
+                "properties": {
+                    "admission_per_hour": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 1000000
+                    },
+                    "pool": {
+                        "type": "string",
+                        "enum": [
+                            "default",
+                            "sandbox"
+                        ]
+                    },
+                    "paused": {
+                        "type": "boolean"
+                    }
+                }
+            }
+        },
+        "guarded_integrations": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {
+                "type": "string",
+                "pattern": "^[a-z0-9][a-z0-9-]{2,31}$"
+            },
+            "description": "Integration credentials that may only submit under a configured tenant admission policy."
+        },
+        "sandbox_ips": {
+            "type": "array",
+            "uniqueItems": true,
+            "maxItems": 63,
+            "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 45
+            },
+            "description": "Local sending IPs reserved for the sandbox pool."
+        },
+        "suppression_url": {
+            "type": "string",
+            "maxLength": 2048,
+            "description": "Optional HTTPS suppression decision endpoint."
+        },
+        "rspamd_url": {
+            "type": "string",
+            "maxLength": 2048,
+            "description": "Optional private Rspamd checkv2 endpoint."
+        },
+        "suppression_token_set": {
+            "type": "boolean"
+        },
+        "rspamd_password_set": {
+            "type": "boolean"
         }
     },
     "additionalProperties": false

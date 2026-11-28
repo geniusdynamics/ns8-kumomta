@@ -185,6 +185,13 @@ elif data.get("webhook_signing_secret"):
 elif not kumo.vault_on(settings):
     settings["webhook_signing_secret_set"] = bool(kumo.read_secret("webhook_signing_secret"))
 
+# Submission guards use private files on each sending node.
+for secret in ("suppression_token", "rspamd_password"):
+    if data.get(secret + "_clear"):
+        kumo.remove_secret(secret)
+    elif data.get(secret):
+        kumo.write_secret(secret, data[secret])
+
 # Throttle store of the cluster. ns8-valkey: per-instance credentials
 # from its grant-client action (25cluster), dropped when the store changes.
 # Manual: the password of the input, shared through OpenBao when it is on.

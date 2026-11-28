@@ -78,6 +78,44 @@ class RenderTest(unittest.TestCase):
         self.assertEqual(table["max_message_rate"], "100/h")
 
 
+    def test_guard_policy_and_isolated_sandbox_pool(self):
+        self.settings.update({
+            "sending_ips": [{"address": "192.0.2.10"}, {"address": "192.0.2.11"}],
+            "sandbox_ips": ["192.0.2.11"],
+            "tenant_policies": {"ci.customer": {"admission_per_hour": 25, "pool": "sandbox", "paused": True}},
+        })
+        self.assertEqual(list(kumo.submission_guard_errors(self.settings)), [])
+        with patch.object(kumo, "cluster_info", return_value=(None, None)):
+            files = kumo.render(self.settings, str(TEMPLATES / "init.lua"))
+        pools = tomllib.loads(files["sources.toml"])["pool"]
+        self.assertEqual(set(pools["default"]), {kumo.source_name(self.settings, "192.0.2.10")})
+        self.assertEqual(set(pools["sandbox"]), {kumo.source_name(self.settings, "192.0.2.11")})
+        self.assertEqual(pools["ns8-paused"], {})
+        policy = tomllib.loads(files["submission-guard.toml"])
+        self.assertEqual(policy["tenant"]["ci.customer"], self.settings["tenant_policies"]["ci.customer"])
+        headers = tomllib.loads(files["dkim_data.toml"])["base"]["headers"]
+        self.assertIn("List-Unsubscribe", headers)
+        self.assertIn("List-Unsubscribe-Post", headers)
+
+    def test_shared_pool_and_unsafe_credential_settings_are_refused(self):
+        self.settings.update({
+            "sending_ips": [{"address": ""}, {"address": "192.0.2.11"}],
+            "sandbox_ips": ["192.0.2.11"], "smarthost_enabled": True,
+            "integrations": [{"name": "bonga", "scopes": ["smtp"]}],
+            "guarded_integrations": ["bonga", "unknown"],
+        })
+        errors = {error[2] for error in kumo.submission_guard_errors(self.settings)}
+        self.assertEqual(errors, {"sandbox_requires_separate_explicit_ips", "sandbox_requires_direct_delivery",
+                                  "tenant_or_prefix_required", "submission_integration_required"})
+
+
+    def test_same_ipv6_address_cannot_be_in_both_pools(self):
+        self.settings["sending_ips"] = [{"address": "2001:db8::1"}, {"address": "2001:db8:0:0:0:0:0:1"}]
+        self.settings["sandbox_ips"] = ["2001:db8::1"]
+        errors = [error[2] for error in kumo.submission_guard_errors(self.settings)]
+        self.assertEqual(errors, ["sandbox_requires_unique_addresses"])
+
+
 class MetricsAllowlistTest(unittest.TestCase):
     def setUp(self):
         self.settings = kumo.load_settings()
